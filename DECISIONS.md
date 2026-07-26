@@ -206,3 +206,78 @@ resolves to 2.3.3).
 **Consequences:** Reproducible dtype behaviour matching the vast majority
 of current pandas documentation and tooling. Revisit this pin later in the
 project rather than fighting a moving target now.
+
+---
+
+## ADR-007: Elexon fetchers — APXMIDP over N2EX, SSP as the imbalance price, quality flags kept out-of-band
+
+**Status:** Accepted (stage 2)
+
+**Context:** `sources_elexon.py` needs to fetch and canonicalise two GB
+price series: imbalance (system) prices and day-ahead prices. Several
+forks came up once the real API responses were inspected (per the brief's
+instruction to validate one real day and print the first raw record before
+writing the parser).
+
+**Decision, part 1 — APXMIDP over N2EX for day-ahead prices:** use
+`dataProviders=APXMIDP` on the `market-index` endpoint. Verified
+empirically (not just assumed) against 2026-07-15: N2EX returned 49
+records with every `price` exactly `0.0`; APXMIDP returned real,
+non-zero prices for the same window. Consequence: the all-zero/empty
+guard (part 3 below) exists specifically because this failure mode is
+real and silent otherwise, not a hypothetical.
+
+**Decision, part 2 — imbalance price field:** the `system-prices` endpoint
+returns both `systemSellPrice` and `systemBuyPrice`. Checked all 48
+periods of a real day — identical throughout, consistent with GB's
+post-2015 (BSC P305) single cash-out price. Use `systemSellPrice` as the
+canonical `price_gbp_per_kwh`, and raise if the two ever differ, rather
+than silently averaging or picking one — same fail-loud philosophy as
+ADR-005. A mismatch would mean either historical dual-price data (pre
+Nov 2015) or a market-design change this fetcher doesn't account for;
+either way it should stop the pipeline, not blend into a number.
+
+*Alternatives considered:* average the two fields (rejected — masks a
+mismatch instead of surfacing it, and does nothing extra while they're
+equal); use `systemBuyPrice` instead (no reason to prefer one over the
+other while both are always equal, so the choice is arbitrary — flagged
+for the user rather than picked silently).
+
+**Decision, part 3 — all-zero/empty guard:** both fetchers raise
+`AllZeroPriceSeriesError` if the parsed series is empty or every price is
+exactly zero, per the brief. This is the guard that would have caught an
+accidental N2EX/APXMIDP mix-up automatically, rather than relying on a
+human noticing a suspiciously flat price column downstream.
+
+**Decision, part 4 — BSAD/derivation quality flags kept out-of-band:** the
+raw imbalance record includes `bsadDefaulted` and `priceDerivationCode`
+(whether a period's price was an estimate/default rather than normally
+derived) — not part of the 5 canonical columns. Rather than drop these,
+`fetch_imbalance_prices()` returns an `ImbalanceFetchResult` with `.prices`
+(canonical) and `.quality_flags` (a side table, joinable on
+settlement_date/settlement_period), so stage 3's data-quality report can
+use them without having to re-fetch or re-derive them later.
+
+*Alternatives considered:* drop entirely now, revisit only if stage 3
+analysis turns up something odd (simpler, but would require re-fetching
+historical data later just to recover a flag we already had in hand).
+
+**Decision, part 5 — DST-aware query window for day-ahead prices:** the
+`market-index` endpoint takes a UTC `from`/`to` window, not a settlement
+date. A naive UTC-calendar-day window does not line up with the London
+settlement day under BST — verified empirically: querying
+`2026-07-15T00:00Z`–`2026-07-16T00:00Z` (UTC calendar day) returns a
+mismatched mix of periods from two different settlement dates, whereas
+the correct window (from `schema.settlement_day_utc_bounds()`, i.e. local
+midnight to local midnight) returns the right 48 periods once filtered to
+the target `settlementDate`. The fetcher queries the correct DST-aware
+window and then filters client-side on `settlementDate`, rather than
+trusting the endpoint's `from`/`to` boundary inclusivity to hand back
+exactly one day.
+
+**Consequences:** `sources_elexon.py` shares `settlement_day_utc_bounds()`
+with `schema.py` (extracted from `expected_period_count()` during this
+stage) rather than reimplementing the DST-window logic a second time.
+Both fetchers accept an injectable `session` (defaults to the `requests`
+module) so tests run against real recorded fixtures
+(`tests/fixtures/elexon_*_2026-07-15.json`) without hitting the network.

@@ -13,7 +13,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from bess.schema import CANONICAL_COLUMNS, SchemaValidationError, expected_period_count, validate
+from bess.schema import (
+    CANONICAL_COLUMNS,
+    SchemaValidationError,
+    expected_period_count,
+    settlement_day_utc_bounds,
+    validate,
+)
 
 
 def _valid_frame(n_periods: int = 4, settlement_date: str = "2026-07-22") -> pd.DataFrame:
@@ -50,6 +56,20 @@ def test_period_count_spring_forward_day():
 def test_period_count_autumn_back_day():
     # 2026-10-25: UK clocks go back 02:00 -> 01:00, day is 25h long
     assert expected_period_count(date(2026, 10, 25)) == 50
+
+
+def test_settlement_day_utc_bounds_in_bst():
+    # London is UTC+1 in July, so local midnight is 23:00 UTC the day before
+    start_utc, end_utc = settlement_day_utc_bounds(date(2026, 7, 15))
+    assert start_utc.isoformat() == "2026-07-14T23:00:00+00:00"
+    assert end_utc.isoformat() == "2026-07-15T23:00:00+00:00"
+
+
+def test_settlement_day_utc_bounds_in_gmt():
+    # London is UTC+0 in January, so local midnight is UTC midnight
+    start_utc, end_utc = settlement_day_utc_bounds(date(2026, 1, 15))
+    assert start_utc.isoformat() == "2026-01-15T00:00:00+00:00"
+    assert end_utc.isoformat() == "2026-01-16T00:00:00+00:00"
 
 
 # --- validate(): happy path --------------------------------------------------

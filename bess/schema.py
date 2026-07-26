@@ -56,17 +56,28 @@ class SchemaValidationError(ValueError):
     """Raised by validate() when a DataFrame violates the canonical contract."""
 
 
+def settlement_day_utc_bounds(settlement_date: date) -> tuple[datetime, datetime]:
+    """
+    UTC instants marking the start and end of a Europe/London settlement day
+    (local midnight to next local midnight). Used both by
+    expected_period_count() below and by fetchers that need to query an API
+    with UTC from/to bounds for a given settlement date (see sources_elexon.py).
+    """
+    start = datetime(settlement_date.year, settlement_date.month, settlement_date.day, tzinfo=LONDON)
+    end = start + timedelta(days=1)
+    # must convert via UTC: subtracting two aware datetimes with the *same*
+    # tzinfo object skips the offset change across a DST boundary (ADR-002)
+    return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+
+
 def expected_period_count(settlement_date: date) -> int:
     """
     Number of half-hour settlement periods in one Europe/London calendar day:
     48 normally, 46 on the spring clock-change day, 50 on the autumn one.
     Computed from actual elapsed time, not hardcoded DST dates. See ADR-002.
     """
-    start = datetime(settlement_date.year, settlement_date.month, settlement_date.day, tzinfo=LONDON)
-    end = start + timedelta(days=1)
-    # must diff via UTC: subtracting two aware datetimes with the *same*
-    # tzinfo object skips the offset change across a DST boundary (ADR-002)
-    elapsed_hours = (end.astimezone(timezone.utc) - start.astimezone(timezone.utc)).total_seconds() / 3600
+    start_utc, end_utc = settlement_day_utc_bounds(settlement_date)
+    elapsed_hours = (end_utc - start_utc).total_seconds() / 3600
     periods = elapsed_hours * 2
     assert periods == int(periods), f"non-half-hour-aligned day length: {elapsed_hours}h"
     return int(periods)
