@@ -13,9 +13,10 @@ Responsible for:
 
 Deliberately NOT responsible for:
     * fetching data from any source (see sources_elexon.py);
-    * repairing gaps or building a complete half-hourly grid — that is a
-      pipeline concern (see pipeline.py) because it requires a policy
-      decision (flag vs fill) that a data *contract* shouldn't make;
+    * deciding what to do about gaps (flag vs fill, thresholds) — that's a
+      policy decision, made in pipeline.py. schema.py only knows the pure
+      calendar fact of which periods *should* exist (full_grid(),
+      expected_period_count()); it doesn't diff that against real data;
     * anything about the battery or optimisation (see config.py).
 
 Conventions locked here: energy in kWh, power in kW, price in £/kWh, 0.5 h
@@ -81,6 +82,32 @@ def expected_period_count(settlement_date: date) -> int:
     periods = elapsed_hours * 2
     assert periods == int(periods), f"non-half-hour-aligned day length: {elapsed_hours}h"
     return int(periods)
+
+
+def full_grid(start_date: date, end_date: date) -> pd.DataFrame:
+    """
+    The complete expected half-hourly grid for [start_date, end_date]
+    inclusive: one row per period that *should* exist, DST-aware (46/48/50
+    per day). Columns: timestamp_utc, settlement_date, settlement_period —
+    no price/source, since this is a pure calendar skeleton, not real data.
+
+    This is what pipeline.py diffs fetched data against to find gaps; it
+    intentionally has no opinion on what to do about a gap (see the module
+    docstring) — it just states what "complete" means.
+    """
+    rows = []
+    d = start_date
+    while d <= end_date:
+        start_utc, _ = settlement_day_utc_bounds(d)
+        for period in range(1, expected_period_count(d) + 1):
+            rows.append((start_utc + timedelta(minutes=30 * (period - 1)), d, period))
+        d += timedelta(days=1)
+
+    grid = pd.DataFrame(rows, columns=["timestamp_utc", "settlement_date", "settlement_period"])
+    grid["timestamp_utc"] = pd.to_datetime(grid["timestamp_utc"], utc=True)
+    grid["settlement_date"] = pd.to_datetime(grid["settlement_date"])
+    grid["settlement_period"] = grid["settlement_period"].astype("int64")
+    return grid
 
 
 def validate(df: pd.DataFrame) -> pd.DataFrame:

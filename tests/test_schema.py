@@ -17,6 +17,7 @@ from bess.schema import (
     CANONICAL_COLUMNS,
     SchemaValidationError,
     expected_period_count,
+    full_grid,
     settlement_day_utc_bounds,
     validate,
 )
@@ -70,6 +71,33 @@ def test_settlement_day_utc_bounds_in_gmt():
     start_utc, end_utc = settlement_day_utc_bounds(date(2026, 1, 15))
     assert start_utc.isoformat() == "2026-01-15T00:00:00+00:00"
     assert end_utc.isoformat() == "2026-01-16T00:00:00+00:00"
+
+
+# --- full_grid ---------------------------------------------------------------
+
+
+def test_full_grid_single_normal_day_has_48_rows():
+    grid = full_grid(date(2026, 7, 15), date(2026, 7, 15))
+    assert len(grid) == 48
+    assert grid["settlement_period"].tolist() == list(range(1, 49))
+    assert grid["timestamp_utc"].is_monotonic_increasing
+    assert grid["timestamp_utc"].nunique() == 48
+
+
+def test_full_grid_spans_dst_transition_with_correct_total():
+    # 2026-03-29 is the 46-period spring day; three days total = 48+46+48
+    grid = full_grid(date(2026, 3, 28), date(2026, 3, 30))
+    assert len(grid) == 48 + 46 + 48
+    per_day_counts = grid.groupby("settlement_date")["settlement_period"].count().tolist()
+    assert per_day_counts == [48, 46, 48]
+
+
+def test_full_grid_is_schema_shaped_minus_price_and_source():
+    grid = full_grid(date(2026, 7, 15), date(2026, 7, 15))
+    assert list(grid.columns) == ["timestamp_utc", "settlement_date", "settlement_period"]
+    assert str(grid["timestamp_utc"].dtype) == "datetime64[ns, UTC]"
+    assert str(grid["settlement_date"].dtype) == "datetime64[ns]"
+    assert str(grid["settlement_period"].dtype) == "int64"
 
 
 # --- validate(): happy path --------------------------------------------------

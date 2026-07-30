@@ -281,3 +281,76 @@ stage) rather than reimplementing the DST-window logic a second time.
 Both fetchers accept an injectable `session` (defaults to the `requests`
 module) so tests run against real recorded fixtures
 (`tests/fixtures/elexon_*_2026-07-15.json`) without hitting the network.
+
+---
+
+## ADR-008: pipeline.py — gaps never fabricate values, thresholds are per-day + run-length, cache before raise
+
+**Status:** Accepted (stage 3)
+
+**Context:** `pipeline.py` fetches a date range day-by-day and needs a
+policy for what happens when periods are missing — the brief asks to
+"repair" the half-hourly grid but also to "flag gaps beyond a configurable
+threshold rather than silently filling," which pull in different
+directions unless the exact behaviour is pinned down.
+
+**Decision, part 1 — the cache never contains a fabricated value.**
+`schema.full_grid()` (added this stage) generates the complete DST-aware
+expected grid purely so `pipeline.py` can diff real fetched data against
+it and count/locate gaps. The returned/cached DataFrame itself contains
+only real, already-validated periods — a gappy day simply has fewer rows
+than `expected_period_count()` for that day. Gaps are only ever visible
+through `DataQualityReport`, never as a placeholder/NaN row in the data
+itself. This keeps the cache always able to pass `schema.validate()`
+as-is (which still rejects NaN prices, unchanged since ADR-005) and pushes
+the "what do I do with an incomplete day" decision to whichever stage
+consumes the cache next (e.g. stage 4 can choose to exclude any day that
+isn't exactly 46/48/50 rows).
+
+*Alternative considered:* reindex onto the full grid and let missing
+periods be real NaN rows in the cached table. Rejected — it's more
+immediately visible ("this day has a hole at period 23" without cross
+-referencing the report), but the cached table would then violate the
+no-NaN canonical contract, and something downstream would have to filter
+it before treating it as validated data. Rejected in favour of keeping
+exactly one definition of "valid data" in the codebase.
+
+**Decision, part 2 — threshold is per-day missing-fraction plus a
+whole-range max-consecutive-missing check.** Each day is judged against
+the same missing-fraction threshold independently (so one bad day's
+fraction doesn't get diluted into, or contaminate, a multi-month average),
+*and* separately, the longest run of consecutive missing periods across
+the entire fetched range (which can span a day boundary — a gap of periods
+47-48 on one day plus 1-2 the next is a 4-period outage, not two
+unrelated 2-period ones) is checked against its own threshold. Two
+distinct failure modes, since "5% of periods missing, scattered as
+isolated blips" and "5% of periods missing, as one contiguous outage" are
+different data-quality problems and can warrant different tolerances.
+
+**Decision, part 3 — cache first, raise after.** `run_pipeline()`
+deliberately writes the merged cache to disk *before* calling
+`_check_thresholds()`. The whole point of a per-day (rather than
+whole-range) threshold, per part 2, is that one bad day shouldn't cost you
+the good days fetched alongside it — so caching is unconditional on the
+threshold check passing. `GapThresholdExceededError` is still raised
+afterwards, so a caller can never silently miss that a day was bad; they
+just don't lose the 89 good days out of 90 finding that out. A failed
+day's fetch (network error, `AllZeroPriceSeriesError`, etc.) is folded
+into the same accounting as a partial in-response gap — both just mean
+"this day has fewer present periods than expected" — so there's one gap
+-handling code path, not two.
+
+**Decision, part 4 — cache merge keeps the freshest value per period.**
+When merging newly-fetched data into an existing parquet cache,
+`drop_duplicates(..., keep="last")` is used with new data concatenated
+after old, so a re-fetched period always overwrites what was cached
+before. This matters because Elexon settlement prices for very recent
+periods can be revised after initial publication; without this, an early
+fetch could permanently freeze a preliminary price in the cache even after
+a corrected value becomes available from a later re-fetch.
+
+**Consequences:** `pipeline.py`'s public entry points
+(`run_imbalance_pipeline`, `run_day_ahead_pipeline`) are thin wrappers
+around a fetcher-agnostic `run_pipeline(fetch_one_day, ...)`, so the gap
+-accounting/caching/threshold logic is written and tested once, not once
+per source.
