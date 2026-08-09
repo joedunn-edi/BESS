@@ -38,10 +38,14 @@ sources_elexon.py   (Elexon BMRS API: imbalance + day-ahead prices)
                           see ADR-008.
         |
         v
-   optimiser_tier1.py   LP (PuLP/CBC), perfect-foresight price vector
-        |                -> maximises arbitrage profit minus degradation
+   optimiser_tier1.py   MILP (PuLP/CBC) on day-ahead (APXMIDP) prices,
+        |                one day at a time, perfect foresight of that day
+        v                -> maximises discharge revenue - charge cost -
+   [ charge/discharge        discharge-side degradation cost, subject to
+     schedule for 1 day]     SoC dynamics, power limits, no simultaneous
+        |                    charge+discharge, and a fixed cyclic
+        |                    start/end SoC (50%, see ADR-009)
         v
-   [ charge/discharge schedule ]
         |
         v
    backtest.py          independent SoC/cashflow simulator
@@ -76,13 +80,14 @@ bess/
     config.py           Battery dataclass (hardware/economic parameters)
     sources_elexon.py   Elexon BMRS fetchers (imbalance + day-ahead)
     pipeline.py         fetch -> gap-report -> cache (parquet)
-    optimiser_tier1.py  LP scheduler, perfect foresight         [stage 4]
+    optimiser_tier1.py  MILP scheduler, one day, perfect foresight
     backtest.py         independent SoC/cashflow simulator      [stage 5]
 tests/
     test_schema.py
     test_config.py
     test_sources_elexon.py
     test_pipeline.py
+    test_optimiser_tier1.py
     fixtures/           recorded real API responses used by test_sources_elexon.py
 data/                   parquet cache (gitignored — regenerable via pipeline.py)
 DECISIONS.md            ADR log — every modelling choice, alternatives weighed
@@ -100,14 +105,16 @@ pytest
 
 Python is pinned to 3.12 (not the system's 3.14) for stable wheel
 availability across pandas/PuLP/pyarrow. pandas is pinned `<3.0` — see
-[ADR-006](DECISIONS.md#adr-006-pandas-pinned-to-30-installed-233).
+[ADR-006](DECISIONS.md#adr-006-pandas-pinned-to-30-installed-233). PuLP is
+pinned `<4.0` for the same reason — see
+[ADR-009](DECISIONS.md#adr-009-tier-1-lp--day-ahead-prices-forbid-simultaneous-chargedischarge-fixed-cyclic-soc-discharge-only-degradation).
 
 ## Status
 
 - [x] Stage 1 — contracts (`schema.py`, `config.py`)
 - [x] Stage 2 — fetchers (`sources_elexon.py`)
 - [x] Stage 3 — pipeline (`pipeline.py`)
-- [ ] Stage 4 — Tier 1 optimiser (`optimiser_tier1.py`)
+- [x] Stage 4 — Tier 1 optimiser (`optimiser_tier1.py`)
 - [ ] Stage 5 — backtester (`backtest.py`)
 - [ ] Stage 6 — naive baseline
 - [ ] Stage 7 — results (P&L, cycles/day, plot)

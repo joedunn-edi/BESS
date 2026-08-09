@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "pandas>=2.2,<3.0",
     "numpy>=1.26",
-    "pulp>=2.8",
+    "pulp>=2.8,<4.0",
     "pyarrow>=16.0",
     "requests>=2.31",
     "matplotlib>=3.9",

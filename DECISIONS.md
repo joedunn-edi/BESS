@@ -354,3 +354,95 @@ a corrected value becomes available from a later re-fetch.
 around a fetcher-agnostic `run_pipeline(fetch_one_day, ...)`, so the gap
 -accounting/caching/threshold logic is written and tested once, not once
 per source.
+
+---
+
+## ADR-009: Tier 1 LP — day-ahead prices, forbid simultaneous charge/discharge, fixed cyclic SoC, discharge-only degradation
+
+**Status:** Accepted (stage 4)
+
+**Context:** `optimiser_tier1.py` needed four modelling decisions pinned
+down before the LP could be written: which price series it represents,
+whether to structurally forbid simultaneous charge/discharge (the brief
+calls this out directly), what the cyclic end-of-day SoC constraint should
+actually equal, and where `degradation_cost_per_kwh` enters the objective.
+
+**Decision, part 1 — day-ahead (APXMIDP), not imbalance, for the main
+results.** Day-ahead prices are published the day before delivery, so a
+real operator could genuinely see the whole day's prices in advance —
+"perfect foresight" is a realistic idealisation of an actually-knowable
+quantity. Imbalance/system prices are only determined after real-time
+balancing occurs; optimising against them with perfect foresight would
+require a crystal ball for something that fundamentally isn't knowable in
+advance, making it a more artificial, backtest-only construct. `solve_day()`
+itself is price-series-agnostic (it just takes a price vector) — this
+decision is about which cached series stage 7 actually feeds it for the
+headline results, not a constraint baked into the LP.
+
+**Decision, part 2 — forbid simultaneous charge/discharge via a binary
+variable per period.** A binary `is_charging[t]` makes `charge_kw[t]` and
+`discharge_kw[t]` mutually exclusive each period
+(`charge_kw[t] <= power_kw * is_charging[t]`,
+`discharge_kw[t] <= power_kw * (1 - is_charging[t])`), matching how a real
+inverter physically operates (one direction at a time). This turns the LP
+into a small MILP, solved instantly by CBC at 46-50 periods/day.
+
+*Alternative considered:* a pure LP relying on economics (efficiency loss
++ degradation cost make simultaneous charge/discharge strictly wasteful,
+so a well-posed LP "shouldn't" choose it). Rejected: this argument breaks
+down exactly when `degradation_cost_per_kwh = 0` combined with
+`round_trip_eff = 1.0` (tested explicitly — see
+`test_flat_price_with_efficiency_loss_means_no_cycling` for the
+lossy case), and more generally relies on an argument that would need
+verifying after every solve rather than being structurally guaranteed.
+Given the problem size makes the MILP free to solve, there's no real cost
+to just forbidding it outright.
+
+**Decision, part 3 — the cyclic start/end SoC is fixed at 50% of capacity,
+not a free decision variable, pending a sensitivity check.** A free
+boundary would let the LP quietly inflate profit by idealising a starting
+condition a real operator doesn't get to choose for free each night. 50%
+is used specifically (not an arbitrary round number): it's the midpoint of
+the usable SoC range, and separately a commonly cited healthy resting
+charge level for lithium-ion cells, minimising both over-charge and
+over-discharge stress. This is flagged as a decision to stress-test, not
+settle by assertion: stage 7 should re-run Tier 1 over the full cached
+history at a few boundary values (e.g. 25/50/75%) and report how much the
+profit ceiling actually moves. If it's insensitive, that's a strong,
+cheap sentence for the write-up ("results are robust to the boundary SoC
+assumption to within X%"); if it isn't, that's a real finding to report
+rather than a footnote.
+
+**Decision, part 4 — degradation cost applies to discharged energy only,
+not both legs of throughput.** Published cycle-life figures for
+lithium-ion cells are conventionally stated in terms of discharged
+throughput or full-cycle-equivalents ("rated for N full cycles," counted
+via discharged kWh/Ah) — that convention is what a real
+`degradation_cost_per_kwh` figure would be calibrated from. Charging the
+cost on both legs while using a discharge-referenced figure would
+double-count wear relative to its own source, unless the per-kWh figure
+were independently halved to compensate — an easy detail to get subtly
+wrong. Applying it to discharge only keeps the cost basis consistent with
+how the number would actually be sourced and cited.
+
+*Alternative considered:* both legs of throughput. More "complete" in
+pure physical-stress terms (charging does stress a cell too), but
+rejected specifically because it would silently misrepresent a
+literature-sourced discharge-referenced figure rather than because the
+physical argument for it is wrong.
+
+**Consequences:** `solve_day()` operates on one day (one price vector) at
+a time, consistent with the cyclic-per-day constraint — multi-day runs
+(stage 7) loop over days and aggregate outside this module.
+`degradation_cost_per_kwh`'s meaning is now fully pinned down (previously
+deferred in `config.py`, stage 1): it is a cost per kWh of *discharged*
+energy specifically, not throughput in general.
+
+**Note (engineering, not modelling):** PuLP 3.x deprecates
+`LpVariable.dicts` and `PULP_CBC_CMD` ahead of a 4.0 release that removes
+them in favour of `problem.add_variable_dicts(...)` and `COIN_CMD`. The
+replacement solver requires an extra ~60MB `cbcbox` binary dependency
+(via the `pulp[cbc]` extra) for a release that isn't out yet. Pinned
+`pulp<4.0` instead (same approach as the pandas pin in ADR-006) — cheaper
+than adding a large binary dependency to silence a warning with no present
+functional effect; revisit when 4.0 is actually released and stable.
