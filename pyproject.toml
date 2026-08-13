@@ -1,7 +1,7 @@
 [project]
 name = "bess"
 version = "0.1.0"
-description = "Battery energy-storage arbitrage system — final-year dissertation project"
+description = "Battery energy-storage arbitrage system"
 requires-python = ">=3.12"
 dependencies = [
     "pandas>=2.2,<3.0",

@@ -1,9 +1,9 @@
 """
 bess — battery energy-storage arbitrage system.
 
-A small research codebase for a final-year dissertation: it fetches GB
-electricity price data, optimises a battery's charge/discharge schedule
-against that price signal, and backtests the result.
+A small research codebase: it fetches GB electricity price data, optimises
+a battery's charge/discharge schedule against that price signal, and
+backtests the result.
 
 Package layout (filled in stage by stage):
     schema.py           canonical data contract + validation

@@ -1,9 +1,9 @@
 # BESS — battery energy-storage arbitrage
 
-A final-year dissertation project: fetch GB electricity price data,
-optimise a battery's charge/discharge schedule against it, and backtest
-the result against an independent simulator. Built stage by stage, with
-every modelling judgement recorded in [DECISIONS.md](DECISIONS.md).
+Fetch GB electricity price data, optimise a battery's charge/discharge
+schedule against it, and backtest the result against an independent
+simulator. Built stage by stage, with every modelling judgement recorded
+in [DECISIONS.md](DECISIONS.md).
 
 ## Conventions (locked, never deviate)
 
