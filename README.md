@@ -44,13 +44,13 @@ sources_elexon.py   (Elexon BMRS API: imbalance + day-ahead prices)
    [ charge/discharge        discharge-side degradation cost, subject to
      schedule for 1 day]     SoC dynamics, power limits, no simultaneous
         |                    charge+discharge, and a fixed cyclic
-        |                    start/end SoC (50%, see ADR-009)
-        v
+        v                    start/end SoC (50%, see ADR-009)
+   backtest.py          independently recomputes SoC + cashflow from the
+        |                schedule with fresh arithmetic (not shared with
+        v                the LP) -> cross-checked to a 1e-6 tolerance as
+   [ agreement verified]    the correctness anchor, see ADR-010
         |
         v
-   backtest.py          independent SoC/cashflow simulator
-        |                -> cross-checked against the LP's own objective
-        v                   value as a correctness anchor
    [ P&L, cycles/day, £/kWh-capacity/year, example-day plot ]
 ```
 
@@ -81,13 +81,14 @@ bess/
     sources_elexon.py   Elexon BMRS fetchers (imbalance + day-ahead)
     pipeline.py         fetch -> gap-report -> cache (parquet)
     optimiser_tier1.py  MILP scheduler, one day, perfect foresight
-    backtest.py         independent SoC/cashflow simulator      [stage 5]
+    backtest.py         independent SoC/cashflow simulator, cross-checks the LP
 tests/
     test_schema.py
     test_config.py
     test_sources_elexon.py
     test_pipeline.py
     test_optimiser_tier1.py
+    test_backtest.py
     fixtures/           recorded real API responses used by test_sources_elexon.py
 data/                   parquet cache (gitignored — regenerable via pipeline.py)
 DECISIONS.md            ADR log — every modelling choice, alternatives weighed
@@ -115,7 +116,7 @@ pinned `<4.0` for the same reason — see
 - [x] Stage 2 — fetchers (`sources_elexon.py`)
 - [x] Stage 3 — pipeline (`pipeline.py`)
 - [x] Stage 4 — Tier 1 optimiser (`optimiser_tier1.py`)
-- [ ] Stage 5 — backtester (`backtest.py`)
+- [x] Stage 5 — backtester (`backtest.py`)
 - [ ] Stage 6 — naive baseline
 - [ ] Stage 7 — results (P&L, cycles/day, plot)
 - [ ] Stage 8 — tests + CI

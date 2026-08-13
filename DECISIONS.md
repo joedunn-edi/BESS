@@ -446,3 +446,61 @@ replacement solver requires an extra ~60MB `cbcbox` binary dependency
 `pulp<4.0` instead (same approach as the pandas pin in ADR-006) — cheaper
 than adding a large binary dependency to silence a warning with no present
 functional effect; revisit when 4.0 is actually released and stable.
+
+---
+
+## ADR-010: backtest.py — genuinely independent arithmetic, a generic array interface, fail-loud on violations
+
+**Status:** Accepted (stage 5)
+
+**Context:** the brief specifies what `backtest.py` needs to do fairly
+precisely (independently recompute SoC/cashflow, cross-check the LP to a
+tiny tolerance), so this stage was mostly implementation judgement rather
+than a modelling fork — recorded here for the reasoning rather than as a
+question that was asked.
+
+**Decision, part 1 — the SoC/cashflow arithmetic is written fresh in
+`backtest.py`, not called from or shared with `optimiser_tier1.py`.** Both
+modules do read `Battery.eta_charge`/`eta_discharge` from `config.py`
+(the intentional single source of truth for efficiency, ADR-003) — that's
+not a violation of independence, it's the one place drift is supposed to
+be structurally impossible. But the SoC-update loop and the
+revenue-minus-cost-minus-degradation calculation are separate code in each
+module. The value of a cross-check comes specifically from two
+independently-derived computations agreeing; if `backtest.py` just called
+back into the LP's own constraint-building code, agreement would be close
+to tautological — a bug in that shared code would reproduce identically in
+"both" places and the check would never catch it.
+
+**Decision, part 2 — `simulate()` takes plain `charge_kw`/`discharge_kw`
+arrays, not a `Tier1Schedule`.** Stage 6's naive baseline will produce a
+schedule that needs backtesting too, and it isn't a `Tier1Schedule` (it
+has no LP objective value, no solver status) — coupling the simulator to
+that type would mean rewriting or wrapping it for stage 6. `simulate()` is
+the reusable, schedule-agnostic core; `assert_matches_lp()` is a thin
+Tier-1-specific layer on top that also checks agreement against the LP's
+own reported numbers specifically.
+
+**Decision, part 3 — violations are reported as flags on
+`BacktestResult`, not silently repaired, and `assert_matches_lp()` raises
+with a specific message identifying which check failed.** Consistent with
+the fail-loud precedent already set in `schema.validate()` (ADR-005) and
+`pipeline.py`'s gap handling (ADR-008): a schedule that violates SoC
+bounds, power limits, or mutual exclusivity is a bug somewhere upstream,
+and should be surfaced precisely, not smoothed over.
+
+**Decision, part 4 — tolerance is `1e-6` (absolute), on both the £
+cashflow comparison and the kWh SoC-trajectory comparison.** Chosen to be
+tight enough to catch a genuine formulation bug (which would typically
+show up as a difference of a meaningful fraction of a kWh or a penny, not
+a rounding artefact) while comfortably clearing ordinary floating-point
+noise from the solver and from independently-accumulated floating-point
+sums over 46-50 periods. Verified in practice against 10 real cached
+day-ahead days (2026-07-10 to 2026-07-19): the LP's own objective and the
+backtester's independently-recomputed cashflow agreed exactly to displayed
+precision on every day, with no bounds or mutual-exclusivity violations.
+
+**Consequences:** stage 6 (naive baseline) can call `simulate()` directly
+to get a comparable cashflow figure without needing anything LP-specific,
+and stage 7's results can call `assert_matches_lp()` as a standing sanity
+check over the full cached history, not just in the test suite.
