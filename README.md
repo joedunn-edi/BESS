@@ -51,6 +51,13 @@ sources_elexon.py   (Elexon BMRS API: imbalance + day-ahead prices)
    [ agreement verified]    the correctness anchor, see ADR-010
         |
         v
+   naive_baseline.py    charge-cheapest/discharge-priciest floor, one full
+        |                cycle sized to this battery -> also run through
+        v                backtest.simulate() for a comparable £ figure
+   [ Tier1 vs naive £ ]     (naive captures ~60% of Tier 1 on real data
+                              tested so far — see ADR-011)
+        |
+        v
    [ P&L, cycles/day, £/kWh-capacity/year, example-day plot ]
 ```
 
@@ -82,6 +89,7 @@ bess/
     pipeline.py         fetch -> gap-report -> cache (parquet)
     optimiser_tier1.py  MILP scheduler, one day, perfect foresight
     backtest.py         independent SoC/cashflow simulator, cross-checks the LP
+    naive_baseline.py   charge-cheapest/discharge-priciest floor for comparison
 tests/
     test_schema.py
     test_config.py
@@ -89,6 +97,7 @@ tests/
     test_pipeline.py
     test_optimiser_tier1.py
     test_backtest.py
+    test_naive_baseline.py
     fixtures/           recorded real API responses used by test_sources_elexon.py
 data/                   parquet cache (gitignored — regenerable via pipeline.py)
 DECISIONS.md            ADR log — every modelling choice, alternatives weighed
@@ -117,6 +126,6 @@ pinned `<4.0` for the same reason — see
 - [x] Stage 3 — pipeline (`pipeline.py`)
 - [x] Stage 4 — Tier 1 optimiser (`optimiser_tier1.py`)
 - [x] Stage 5 — backtester (`backtest.py`)
-- [ ] Stage 6 — naive baseline
+- [x] Stage 6 — naive baseline (`naive_baseline.py`)
 - [ ] Stage 7 — results (P&L, cycles/day, plot)
 - [ ] Stage 8 — tests + CI

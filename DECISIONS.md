@@ -504,3 +504,49 @@ precision on every day, with no bounds or mutual-exclusivity violations.
 to get a comparable cashflow figure without needing anything LP-specific,
 and stage 7's results can call `assert_matches_lp()` as a standing sanity
 check over the full cached history, not just in the test suite.
+
+---
+
+## ADR-011: naive baseline — N derived from the battery, exact cyclic match, two different N values per direction
+
+**Status:** Accepted (stage 6)
+
+**Context:** the brief describes the naive baseline in plain English
+("charge the N cheapest periods, discharge the N dearest"), which leaves
+two things unstated: how N is actually chosen, and whether the naive
+schedule has to play by the same start=end SoC rule Tier 1 does.
+
+**Decision, part 1 — N is derived from the battery's own physical limits
+(one full daily cycle: boundary SoC -> soc_max -> boundary SoC), not a
+separately-configurable number.** This makes the baseline's scale
+principled and battery-specific rather than arbitrary, and gives a
+natural interpretation to "the naive strategy" — it does the single
+largest cycle this battery can physically complete in a day.
+
+**Decision, part 2 — the naive schedule enforces the same exact cyclic
+boundary as Tier 1**, via a partial-power period on whichever chosen
+period is marginal (the priciest of the charging set, the cheapest of the
+discharging set) rather than whole full-power periods only. This keeps
+the comparison to Tier 1 fair: both strategies start and end the day at
+the same SoC, so any profit gap reflects scheduling skill, not one
+strategy quietly banking extra stored value the other didn't.
+
+**Decision, part 3 (a consequence of part 1, not separately asked) — N is
+actually two different numbers, N_charge and N_discharge, not one shared
+N.** Round-trip efficiency is asymmetric in its effect on period counts:
+charging loses energy on the way *in*, so adding a given amount of stored
+energy takes *more* full-power periods than removing the same amount via
+discharging, which loses energy on the way *out* instead — the "N cheapest
+/ N dearest" framing in the brief is a simplification of what's actually
+two related-but-different counts once efficiency losses are real (< 1).
+Implemented as two derivations from the same headroom (`soc_max_kwh -
+boundary_soc_kwh`), one per direction; flagged here rather than silently
+picked, since it's a legitimate reading of an ambiguous plain-English
+description.
+
+**Consequences:** verified against real cached day-ahead data over the
+same 10 real days used in stages 4-5: the naive baseline sits strictly
+below the Tier 1 ceiling on every single day, capturing about 60% of
+Tier 1's total profit over that window — consistent with a baseline
+capped at one cycle competing against an optimiser free to exploit
+multiple price swings per day where the data supports it.
