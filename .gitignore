@@ -11,5 +11,8 @@ dist/
 data/*.parquet
 data/*.csv
 
+# generated plots — regenerable from results.py, not source-controlled
+results/*.png
+
 # local scratch / notebooks output
 *.ipynb_checkpoints/

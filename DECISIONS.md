@@ -413,6 +413,25 @@ cheap sentence for the write-up ("results are robust to the boundary SoC
 assumption to within X%"); if it isn't, that's a real finding to report
 rather than a footnote.
 
+**Update (stage 7, real full-year sweep):** it isn't insensitive. Over the
+full cached year (2025-08-14 to 2026-08-13, 365/365 days solved, battery:
+100 kWh / 50 kW / 90% RTE / SoC 5-95% / £0.01/kWh degradation):
+
+| boundary_soc | total annual profit |
+|---|---|
+| 0.25 | £1650.32 |
+| 0.50 | £1563.72 |
+| 0.75 | £1420.55 |
+
+A 16.2% spread between the extremes tested — not a rounding footnote. The
+direction makes sense once you see it: with `soc_max=0.95`, a *lower*
+boundary leaves more headroom between the boundary and `soc_max`, so each
+day's "charge up" leg can absorb more energy before hitting the ceiling —
+a bigger achievable cycle amplitude, not a numerical artefact. This means
+the 50% choice is a genuine, stated modelling assumption that measurably
+shapes the headline profit figure, not a detail that washes out — worth
+saying plainly in any write-up of these results, not glossed over.
+
 **Decision, part 4 — degradation cost applies to discharged energy only,
 not both legs of throughput.** Published cycle-life figures for
 lithium-ion cells are conventionally stated in terms of discharged
@@ -550,3 +569,59 @@ below the Tier 1 ceiling on every single day, capturing about 60% of
 Tier 1's total profit over that window — consistent with a baseline
 capped at one cycle competing against an optimiser free to exploit
 multiple price swings per day where the data supports it.
+
+---
+
+## ADR-012: results.py — discharge-based cycles/day, per-day failure isolation, a full year fetched for credibility
+
+**Status:** Accepted (stage 7)
+
+**Context:** stage 7 aggregates Tier 1 over the entire cached history into
+a few headline numbers, which meant deciding what "cycles/day" actually
+counts, how a bad day should be handled in a 365-day batch run, and how
+much history was worth fetching before the numbers meant anything.
+
+**Decision, part 1 — cycles/day is discharge-based**
+(`discharged_kwh / usable_capacity_kwh`, averaged over all solved days),
+consistent with the discharge-referenced degradation convention already
+adopted in ADR-009. Manufacturer cycle-life figures ("N full cycles") are
+themselves discharge-referenced, so measuring cycles the same way keeps
+this number directly comparable to a real datasheet figure — not a fresh
+fork, just carrying an already-made decision through consistently.
+
+**Decision, part 2 — a failing day is excluded and recorded, not fatal to
+the whole run**, directly acting on the Q9 discussion from ADR-010: a
+batch check over hundreds of days needs full visibility in one pass, not
+a stop at the first failure. `run_tier1_over_history()` catches
+`RuntimeError` (non-optimal solve) and `AssertionError` (a
+backtest-cross-check failure) per day, continues, and returns
+`failed_days` as data the caller can inspect — the correctness anchor from
+stage 5 still runs on every single day, it just doesn't abort the batch.
+
+**Decision, part 3 — fetched a full year of real day-ahead data (365
+days, 2025-08-14 to 2026-08-13) rather than running results on the 10
+days already cached.** Chosen over the user's own stated preference for
+credibility: cumulative P&L, cycles/day, and especially an *annualised*
+£/kWh-capacity/year figure are far more defensible computed from an
+actual year (capturing real seasonal variation — the best day found,
+2026-06-23, both a summer day and by far the most profitable, at £34.69
+vs a typical day around £1-10) than extrapolated from 10 days in one
+month.
+
+**Consequences (results over the full year, battery: 100 kWh / 50 kW /
+90% RTE / SoC 5-95% / £0.01/kWh degradation, boundary_soc=0.5):**
+- 365/365 days solved to optimality and passed the LP/backtester
+  cross-check — zero failures, the strongest evidence yet that the
+  formulation is correct across genuinely varied real price conditions,
+  not just the 10 days used during development.
+- Cumulative Tier 1 profit: £1563.72/year. Naive baseline: £880.90/year
+  (56% of Tier 1) — consistent with the ~60% seen on the smaller 10-day
+  sample in ADR-011, not a fluke of that smaller window.
+- Mean cycles/day: 1.368 — Tier 1 usually completes just over one full
+  cycle per day, sometimes more when the day's price pattern supports a
+  second profitable swing (see the example-day plot, which shows two
+  cycles on 2026-06-23).
+- Annualised: £15.64 per kWh of installed capacity per year.
+- The boundary_soc sensitivity check promised in ADR-009 was run here
+  and found to be a genuine, non-negligible effect (16.2% spread) — see
+  the update appended to ADR-009 rather than duplicated here.

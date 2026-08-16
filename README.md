@@ -54,11 +54,15 @@ sources_elexon.py   (Elexon BMRS API: imbalance + day-ahead prices)
    naive_baseline.py    charge-cheapest/discharge-priciest floor, one full
         |                cycle sized to this battery -> also run through
         v                backtest.simulate() for a comparable £ figure
-   [ Tier1 vs naive £ ]     (naive captures ~60% of Tier 1 on real data
-                              tested so far — see ADR-011)
+   [ Tier1 vs naive £ ]     see ADR-011
         |
         v
-   [ P&L, cycles/day, £/kWh-capacity/year, example-day plot ]
+   results.py           runs Tier 1 (+ naive, + the LP/backtest cross
+                          -check) over the full cached history, per day,
+                          isolating any failing day rather than aborting
+                          the batch -> cumulative P&L, cycles/day,
+                          annualised £/kWh-capacity/year, one example-day
+                          plot. See ADR-012 and the Results section below.
 ```
 
 `config.py` (the `Battery` dataclass) is read by both `optimiser_tier1.py`
@@ -79,6 +83,34 @@ these columns, in this order:
 | `price_gbp_per_kwh` | float | already converted from Elexon's £/MWh |
 | `source` | str | which fetcher/API produced this row |
 
+## Results
+
+Tier 1 run over a full year of real day-ahead prices (2025-08-14 to
+2026-08-13, 365/365 days solved, every day cross-checked against the
+independent backtester with zero failures). Battery: 100 kWh / 50 kW /
+90% round-trip efficiency / SoC 5-95% / £0.01 per kWh degradation
+(discharge-referenced), boundary_soc=0.5.
+
+| Metric | Tier 1 | Naive baseline |
+|---|---|---|
+| Cumulative annual profit | £1563.72 | £880.90 (56% of Tier 1) |
+| Mean cycles/day | 1.368 | (capped at 1 cycle/day by construction) |
+| £ per kWh of capacity per year | £15.64 | — |
+
+The boundary_soc=50% assumption (ADR-009) turned out **not** to be
+insensitive: sweeping 25/50/75% gave £1650.32 / £1563.72 / £1420.55 — a
+16.2% spread, with lower boundary values winning because they leave more
+headroom before `soc_max`. Recorded as a genuine finding in ADR-009, not
+smoothed over.
+
+Example day (2026-06-23, the most profitable day found — a summer day
+with a large evening price spike over £550/MWh): regenerate with
+`bess.results.plot_example_day()`, saved to `results/example_day.png`
+(gitignored, regenerable — not committed).
+
+Full reasoning for every metric definition and the failure-isolation
+approach: [ADR-012](DECISIONS.md#adr-012-resultspy--discharge-based-cyclesday-per-day-failure-isolation-a-full-year-fetched-for-credibility).
+
 ## Project layout
 
 ```
@@ -90,6 +122,7 @@ bess/
     optimiser_tier1.py  MILP scheduler, one day, perfect foresight
     backtest.py         independent SoC/cashflow simulator, cross-checks the LP
     naive_baseline.py   charge-cheapest/discharge-priciest floor for comparison
+    results.py          runs Tier 1 over cached history, metrics, example-day plot
 tests/
     test_schema.py
     test_config.py
@@ -98,8 +131,10 @@ tests/
     test_optimiser_tier1.py
     test_backtest.py
     test_naive_baseline.py
+    test_results.py
     fixtures/           recorded real API responses used by test_sources_elexon.py
 data/                   parquet cache (gitignored — regenerable via pipeline.py)
+results/                generated plots (gitignored — regenerable via results.py)
 DECISIONS.md            ADR log — every modelling choice, alternatives weighed
 README.md               this file
 ```
@@ -127,5 +162,5 @@ pinned `<4.0` for the same reason — see
 - [x] Stage 4 — Tier 1 optimiser (`optimiser_tier1.py`)
 - [x] Stage 5 — backtester (`backtest.py`)
 - [x] Stage 6 — naive baseline (`naive_baseline.py`)
-- [ ] Stage 7 — results (P&L, cycles/day, plot)
+- [x] Stage 7 — results (`results.py`)
 - [ ] Stage 8 — tests + CI
