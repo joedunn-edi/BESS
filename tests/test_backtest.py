@@ -12,7 +12,7 @@ import pytest
 
 from bess.backtest import assert_matches_lp, simulate
 from bess.config import Battery
-from bess.optimiser_tier1 import solve_day
+from bess.optimiser_tier1 import Tier1Schedule, solve_day
 
 
 def _battery(**overrides) -> Battery:
@@ -112,4 +112,75 @@ def test_assert_matches_lp_raises_on_genuine_disagreement():
         status=schedule.status,
     )
     with pytest.raises(AssertionError, match="disagrees"):
+        assert_matches_lp(tampered, prices, battery)
+
+
+def _tampered_schedule(schedule, **overrides):
+    fields = dict(
+        charge_kw=schedule.charge_kw,
+        discharge_kw=schedule.discharge_kw,
+        soc_kwh=schedule.soc_kwh,
+        objective_value=schedule.objective_value,
+        status=schedule.status,
+    )
+    fields.update(overrides)
+    return schedule.__class__(**fields)
+
+
+def test_assert_matches_lp_raises_on_soc_bounds_violation():
+    prices = np.array([0.05, 0.20, 0.05, 0.20])
+    battery = _battery()
+    schedule = solve_day(prices, battery, boundary_soc=0.5)
+
+    # a schedule the LP could never produce itself, but assert_matches_lp
+    # must still catch it if handed one directly (e.g. a hand-built or
+    # naive schedule tampered with by a bug elsewhere)
+    tampered = _tampered_schedule(schedule, soc_kwh=schedule.soc_kwh + 100.0)
+    with pytest.raises(AssertionError, match="SoC bounds violated"):
+        assert_matches_lp(tampered, prices, battery)
+
+
+def test_assert_matches_lp_raises_on_power_limit_violation():
+    # built by hand with a huge capacity relative to the overshoot, rather
+    # than tampering with a real solve_day() result, so the power-limit
+    # check is isolated from the SoC-bounds check (checked first) — bounds
+    # and power checks both run against simulate()'s own recomputed SoC,
+    # not the soc_kwh handed in here, which is only used for its seed
+    # value (index 0) and the later SoC-trajectory comparison, never
+    # reached because the power check raises first
+    prices = np.array([0.05, 0.20, 0.05, 0.20])
+    battery = _battery(capacity_kwh=10_000.0)
+    charge_kw = np.array([battery.power_kw + 1.0, 0.0, 0.0, 0.0])
+    discharge_kw = np.zeros(4)
+    soc_kwh = np.full(5, 5000.0)
+    tampered = Tier1Schedule(charge_kw, discharge_kw, soc_kwh, objective_value=0.0, status="Optimal")
+
+    with pytest.raises(AssertionError, match="power limits violated"):
+        assert_matches_lp(tampered, prices, battery)
+
+
+def test_assert_matches_lp_raises_on_simultaneous_charge_discharge():
+    prices = np.array([0.05, 0.20, 0.05, 0.20])
+    battery = _battery()
+    schedule = solve_day(prices, battery, boundary_soc=0.5)
+
+    tampered_discharge = schedule.discharge_kw.copy()
+    tampered_discharge[0] = battery.power_kw  # period 0 already has charge_kw > 0
+    tampered = _tampered_schedule(schedule, discharge_kw=tampered_discharge)
+    with pytest.raises(AssertionError, match="simultaneous charge and discharge"):
+        assert_matches_lp(tampered, prices, battery)
+
+
+def test_assert_matches_lp_raises_on_soc_trajectory_disagreement():
+    prices = np.array([0.05, 0.20, 0.05, 0.20])
+    battery = _battery()
+    schedule = solve_day(prices, battery, boundary_soc=0.5)
+
+    # a plausible-looking but wrong SoC trajectory, still within bounds,
+    # so this exercises the SoC-comparison branch specifically rather than
+    # the bounds check above it
+    tampered_soc = schedule.soc_kwh.copy()
+    tampered_soc[1] += 0.5
+    tampered = _tampered_schedule(schedule, soc_kwh=tampered_soc)
+    with pytest.raises(AssertionError, match="SoC trajectory disagrees"):
         assert_matches_lp(tampered, prices, battery)
