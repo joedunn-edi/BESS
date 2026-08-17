@@ -15,7 +15,7 @@ import pandas as pd
 import pytest
 
 from bess.config import Battery
-from bess.results import boundary_soc_sensitivity, run_tier1_over_history
+from bess.results import boundary_soc_sensitivity, plot_example_day, run_tier1_over_history
 from bess.schema import settlement_day_utc_bounds, validate
 
 
@@ -151,3 +151,18 @@ def test_boundary_soc_sensitivity_returns_all_requested_values():
 
     assert set(sensitivity.keys()) == {0.25, 0.5, 0.75}
     assert all(isinstance(v, float) for v in sensitivity.values())
+
+
+# --- plotting (smoke test) --------------------------------------------------------
+
+
+def test_plot_example_day_produces_a_file(tmp_path):
+    history = _day_frame(date(2026, 1, 1), [0.05, 0.20, 0.05, 0.20])
+    battery = _battery(degradation_cost_per_kwh=0.0)
+    results = run_tier1_over_history(history, battery, boundary_soc=0.5)
+
+    output_path = tmp_path / "example_day.png"
+    plot_example_day(results.day_results[0], battery, boundary_soc=0.5, output_path=str(output_path))
+
+    assert output_path.exists()
+    assert output_path.stat().st_size > 0

@@ -8,6 +8,8 @@ by hand and against real cached data, and the guard against a battery too
 large to cycle within one day.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -97,9 +99,14 @@ def test_raises_when_battery_cannot_cycle_within_one_day():
 
 # --- against real cached data ----------------------------------------------------
 
+FIXTURES = Path(__file__).parent / "fixtures"
+
 
 def test_naive_sits_below_tier1_on_real_data():
-    df = pd.read_parquet("data/day_ahead.parquet")
+    # a committed 10-day real sample, not the local (gitignored) full-year
+    # cache — this test must pass on a fresh checkout / in CI without
+    # depending on pipeline.py having been run first.
+    df = pd.read_parquet(FIXTURES / "day_ahead_sample_2026-07-10_to_2026-07-19.parquet")
     battery = _battery(
         capacity_kwh=100.0, power_kw=50.0, round_trip_eff=0.9, soc_min=0.05, soc_max=0.95, degradation_cost_per_kwh=0.01
     )

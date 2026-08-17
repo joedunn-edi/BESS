@@ -1,5 +1,7 @@
 # BESS — battery energy-storage arbitrage
 
+[![CI](https://github.com/joedunn-edi/BESS/actions/workflows/ci.yml/badge.svg)](https://github.com/joedunn-edi/BESS/actions/workflows/ci.yml)
+
 Fetch GB electricity price data, optimise a battery's charge/discharge
 schedule against it, and backtest the result against an independent
 simulator. Built stage by stage, with every modelling judgement recorded
@@ -163,4 +165,4 @@ pinned `<4.0` for the same reason — see
 - [x] Stage 5 — backtester (`backtest.py`)
 - [x] Stage 6 — naive baseline (`naive_baseline.py`)
 - [x] Stage 7 — results (`results.py`)
-- [ ] Stage 8 — tests + CI
+- [x] Stage 8 — tests + CI (`.github/workflows/ci.yml`)

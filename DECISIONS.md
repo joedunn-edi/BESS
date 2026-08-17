@@ -625,3 +625,48 @@ month.
 - The boundary_soc sensitivity check promised in ADR-009 was run here
   and found to be a genuine, non-negligible effect (16.2% spread) — see
   the update appended to ADR-009 rather than duplicated here.
+
+---
+
+## ADR-013: CI — a committed real-data fixture instead of the gitignored local cache
+
+**Status:** Accepted (stage 8)
+
+**Context:** wiring up CI (GitHub Actions, `.github/workflows/ci.yml`)
+surfaced a real bug rather than a hypothetical one:
+`test_naive_baseline.py::test_naive_sits_below_tier1_on_real_data` read
+`data/day_ahead.parquet` directly — a file that only exists locally
+because it was fetched during earlier stages, and is gitignored on
+purpose (ADR-006/ADR-008 precedent: cached data is regenerable, not
+source-controlled). On a fresh checkout, or in CI, that file simply isn't
+there, and the test would fail on a missing-file error that has nothing
+to do with the code being wrong. Verified by temporarily moving `data/`
+aside locally and re-running the full suite before treating this as
+fixed, not just asserting it.
+
+**Decision:** extracted a small (10-day, 480-row) real slice of the
+already-fetched day-ahead data into a committed fixture
+(`tests/fixtures/day_ahead_sample_2026-07-10_to_2026-07-19.parquet`),
+matching the pattern already established in stage 2
+(`tests/fixtures/elexon_*.json` — real recorded API responses, committed,
+used via dependency injection instead of live calls). The test now reads
+from this fixture instead of the local cache.
+
+**Alternatives considered:**
+- *Skip the test if the cache file doesn't exist* (`pytest.mark.skipif`).
+  Rejected: silently skipping a real-data correctness check in CI is
+  exactly the kind of "looks green but isn't actually checking anything"
+  outcome this project has avoided elsewhere (see ADR-008's "no silent
+  gap-filling").
+- *Fetch fresh data at test time.* Rejected: makes the test suite's
+  runtime and pass/fail status depend on Elexon's API being up and fast,
+  every time CI runs — flaky and slow for something that only needs to
+  confirm a comparison holds on data that doesn't change.
+
+**Consequences:** the full test suite (83 tests, 96% coverage) now passes
+identically whether or not `pipeline.py` has ever been run locally —
+verified directly, not assumed. CI (`.github/workflows/ci.yml`) runs
+`pytest -v --cov=bess --cov-report=term-missing` on every push/PR to
+`master` on a clean `ubuntu-latest` checkout, so this class of bug (a test
+that only passes because of leftover local state) can't silently
+reappear.
