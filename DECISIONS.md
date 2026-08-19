@@ -670,3 +670,67 @@ verified directly, not assumed. CI (`.github/workflows/ci.yml`) runs
 `master` on a clean `ubuntu-latest` checkout, so this class of bug (a test
 that only passes because of leftover local state) can't silently
 reappear.
+
+---
+
+## Tier 2 — a rolling-horizon (MPC) controller using a learned price forecast
+
+Everything from here on is a second phase beyond the original 8-stage
+plan: Tier 1 assumes perfect foresight of a day's prices, which is a
+useful ceiling but not something a real deployed battery has access to.
+Tier 2 asks a different question: using only a forecast of future prices
+(learned from historical patterns, not a crystal ball), how much of that
+ceiling can a realistic, causally-valid controller actually capture?
+
+## ADR-014: features.py — drop warm-up rows rather than impute, and a black-box leakage guard
+
+**Status:** Accepted (Tier 2, part 1)
+
+**Context:** `build_features()` needs lag (t-1, t-2, t-48, t-336) and
+rolling-statistic (trailing 48-period mean/std) features. Both leave the
+first `max(lag)` = 336 rows of any series without a valid value, and
+getting the leakage boundary wrong here would silently invalidate every
+result built on top of it later (the forecaster's accuracy, and the MPC
+controller's profit figure).
+
+**Decision, part 1 — drop rows without full history, don't impute.**
+Filling in a plausible-looking value for history that doesn't exist (e.g.
+backfilling, or a global mean) would be a silent, undetectable assumption
+baked into the training data — precisely the kind of "coerce rather than
+reject" choice this project rejected for the canonical schema in ADR-005.
+Dropping is simpler and honest: it costs 336 periods (a week) at the
+start of the cached history, which is a rounding error against a
+full-year sample.
+
+**Decision, part 2 — the leakage guard is a black-box behavioural test,
+not a check that the code reads correctly.** Rather than asserting shift
+amounts are positive (a check that only catches a bug the same way it was
+introduced — reading the code and confirming it says what you think it
+says), `tests/test_tier2_features.py` corrupts only the *future* portion
+of a price series and asserts every feature row computed from data
+strictly before the corruption point is byte-identical to the
+uncorrupted run. This is the direct Tier 2 analogue of the Stage 5
+LP/backtest cross-check: a property-level check that would catch a
+leakage bug regardless of *how* it was introduced (a forgotten `.shift()`,
+an off-by-one, a rolling window that isn't pre-shifted), not just the one
+bug pattern the author happened to think to check for. Verified the test
+actually discriminates real leakage from correct code by rebuilding a
+deliberately-leaky rolling mean (no `shift(1)` before `.rolling()`) and
+confirming the same corruption-comparison technique catches it, rather
+than trusting the guard's design without evidence it can fail.
+
+**Decision, part 3 — calendar features derived from `settlement_period`/
+`settlement_date`, not `timestamp_utc`.** These are already
+local-calendar-of-record fields on the canonical schema (ADR-001) — using
+them sidesteps the UTC/London-offset conversion this project has handled
+carefully everywhere else (ADR-002), rather than reintroducing it for a
+feature that doesn't need it. Consequence: `hour_of_day` can read as `24`
+on the rare autumn clock-change day (the genuine extra repeated half-hour
+pair) rather than staying confined to `0-23` — a faithful reflection of
+that day actually having an extra half-hour, not a bug to paper over.
+
+**Consequences:** verified against the real full-year cache: 17,520 raw
+periods produce exactly 17,184 feature rows (336 dropped, matching
+`max(LAG_PERIODS)` exactly), zero NaNs in the output. `forecaster.py` and
+`mpc.py` can build on this feature matrix without re-deriving or
+re-verifying the leakage boundary themselves.

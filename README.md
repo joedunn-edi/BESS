@@ -125,6 +125,10 @@ bess/
     backtest.py         independent SoC/cashflow simulator, cross-checks the LP
     naive_baseline.py   charge-cheapest/discharge-priciest floor for comparison
     results.py          runs Tier 1 over cached history, metrics, example-day plot
+    features.py          Tier 2: leakage-safe lag/calendar/rolling feature matrix
+    forecaster.py         Tier 2: price forecasting model              [in progress]
+    mpc.py                 Tier 2: rolling-horizon controller           [pending]
+    results_tier2.py       Tier 2: MPC backtest + comparison            [pending]
 tests/
     test_schema.py
     test_config.py
@@ -134,6 +138,7 @@ tests/
     test_backtest.py
     test_naive_baseline.py
     test_results.py
+    test_tier2_features.py
     fixtures/           recorded real API responses used by test_sources_elexon.py
 data/                   parquet cache (gitignored — regenerable via pipeline.py)
 results/                generated plots (gitignored — regenerable via results.py)
@@ -166,3 +171,10 @@ pinned `<4.0` for the same reason — see
 - [x] Stage 6 — naive baseline (`naive_baseline.py`)
 - [x] Stage 7 — results (`results.py`)
 - [x] Stage 8 — tests + CI (`.github/workflows/ci.yml`)
+
+**Tier 2 (rolling-horizon MPC controller, using a learned forecast instead of perfect foresight):**
+
+- [x] Part 1 — features (`features.py`) — see [ADR-014](DECISIONS.md#adr-014-featurespy--drop-warm-up-rows-rather-than-impute-and-a-black-box-leakage-guard)
+- [ ] Part 2 — forecaster (`forecaster.py`)
+- [ ] Part 3 — MPC controller (`mpc.py`)
+- [ ] Part 4 — results + corrupted-forecast sanity check (`results_tier2.py`)
