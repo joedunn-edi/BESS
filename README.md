@@ -126,7 +126,7 @@ bess/
     naive_baseline.py   charge-cheapest/discharge-priciest floor for comparison
     results.py          runs Tier 1 over cached history, metrics, example-day plot
     features.py          Tier 2: leakage-safe lag/calendar/rolling feature matrix
-    forecaster.py         Tier 2: price forecasting model              [in progress]
+    forecaster.py         Tier 2: LightGBM price forecaster, one model per horizon
     mpc.py                 Tier 2: rolling-horizon controller           [pending]
     results_tier2.py       Tier 2: MPC backtest + comparison            [pending]
 tests/
@@ -139,6 +139,7 @@ tests/
     test_naive_baseline.py
     test_results.py
     test_tier2_features.py
+    test_tier2_forecaster.py
     fixtures/           recorded real API responses used by test_sources_elexon.py
 data/                   parquet cache (gitignored — regenerable via pipeline.py)
 results/                generated plots (gitignored — regenerable via results.py)
@@ -161,6 +162,15 @@ availability across pandas/PuLP/pyarrow. pandas is pinned `<3.0` — see
 pinned `<4.0` for the same reason — see
 [ADR-009](DECISIONS.md#adr-009-tier-1-lp--day-ahead-prices-forbid-simultaneous-chargedischarge-fixed-cyclic-soc-discharge-only-degradation).
 
+**macOS only:** LightGBM (Tier 2) needs the OpenMP runtime, which isn't
+installed by default with Homebrew Python — `pip install` succeeds but
+`import lightgbm` fails with a `dlopen`/`Library not loaded` error until
+you run:
+
+```bash
+brew install libomp
+```
+
 ## Status
 
 - [x] Stage 1 — contracts (`schema.py`, `config.py`)
@@ -175,6 +185,6 @@ pinned `<4.0` for the same reason — see
 **Tier 2 (rolling-horizon MPC controller, using a learned forecast instead of perfect foresight):**
 
 - [x] Part 1 — features (`features.py`) — see [ADR-014](DECISIONS.md#adr-014-featurespy--drop-warm-up-rows-rather-than-impute-and-a-black-box-leakage-guard)
-- [ ] Part 2 — forecaster (`forecaster.py`)
+- [x] Part 2 — forecaster (`forecaster.py`) — see [ADR-015](DECISIONS.md#adr-015-forecasterpy--direct-multi-horizon-models-and-a-real-degradation-finding)
 - [ ] Part 3 — MPC controller (`mpc.py`)
 - [ ] Part 4 — results + corrupted-forecast sanity check (`results_tier2.py`)

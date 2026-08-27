@@ -734,3 +734,70 @@ periods produce exactly 17,184 feature rows (336 dropped, matching
 `max(LAG_PERIODS)` exactly), zero NaNs in the output. `forecaster.py` and
 `mpc.py` can build on this feature matrix without re-deriving or
 re-verifying the leakage boundary themselves.
+
+## ADR-015: forecaster.py — direct multi-horizon models, and a real degradation finding
+
+**Status:** Accepted (Tier 2, part 2)
+
+**Context:** `mpc.py` needs a full price-path forecast (periods t+1
+through t+H) at every decision point, and the brief asks for an accuracy
+comparison across horizons (1 period ahead vs 48) to sanity-check that
+accuracy degrades as expected — a flat accuracy curve across horizons
+would be a leakage red flag.
+
+**Decision, part 1 — direct multi-horizon forecasting: one LightGBM model
+per horizon, not recursive 1-step iteration.** Recursive forecasting
+(predict t+1, then feed that prediction back in as if it were a real
+`lag_1` value to predict t+2, and so on) compounds error at every step and
+means a lag feature sometimes holds real data and sometimes the model's
+own guess — a semantic inconsistency that's also a plausible route for
+foresight to quietly leak in. Direct per-horizon models (`target_h[i] =
+price[i+h-1]`, same features, a fresh shifted target per horizon) avoid
+both problems and are standard practice for tree-based models, which have
+no native sequence-generation mechanism the way an RNN would. Training
+cost is negligible at this data size (a few seconds per horizon).
+
+**Decision, part 2 — a real bug found and fixed: `naive_forecast()` must
+be built from `lag_48`, not by re-shifting the already-truncated feature
+frame.** The first implementation computed `price_gbp_per_kwh.shift(49 -
+horizon)` directly on `features_df` — but that frame has already had its
+first 336 rows dropped (ADR-014), so re-shifting it from scratch throws
+away validity that `lag_48` (computed *before* the drop) already has.
+Concretely, at horizon=1 this made the naive baseline disagree with its
+own literal definition (`lag_48`) on the first 48 rows for no reason.
+Fixed by deriving `naive_forecast` from the existing `lag_48` column
+(`lag_48.shift(-(horizon-1))`), which reaches back into pre-drop history
+correctly and only loses rows at the genuinely-unavoidable trailing edge
+(the last `horizon-1` rows, which have no future target to compare
+against at all — the same edge `_target_for_horizon` has). Found via a
+test written to confirm the horizon=1 case exactly matches `lag_48` per
+the brief's own definition, not by inspection.
+
+**Consequences — real evaluation results, full cached year, 5-fold
+expanding-window time-series CV:**
+
+| horizon | model MAE | naive MAE | model beats naive |
+|---|---|---|---|
+| 1 (30 min) | 0.0056 | 0.0231 | yes, by ~4x |
+| 6 (3 h) | 0.0161 | 0.0231 | yes |
+| 12 (6 h, MPC's default H) | 0.0215 | 0.0231 | yes, narrowly (~7%) |
+| 24 (12 h) | 0.0245 | 0.0231 | **no** |
+| 48 (24 h) | 0.0252 | 0.0231 | **no** |
+
+Accuracy degrades monotonically with horizon as expected (a flat curve
+would have been a leakage red flag) — reassuring evidence the leakage
+guard in ADR-014 is doing its job, not just passing its own tests. The
+model clearly beats naive across the horizons MPC actually uses (up to
+H=12), which is what this stage needed to prove; per the brief, stopped
+here rather than tuning further. Flagged for later: the model's edge
+narrows sharply approaching h=12 and is gone by h=24 — pushing MPC's
+horizon much past its current default without reconsidering the
+forecaster would likely stop helping.
+
+**Note (engineering, not modelling):** LightGBM requires the OpenMP
+runtime (`libomp`) on macOS, not installed by default with Homebrew
+Python — `pip install` succeeds but the import fails with a
+`dlopen`/`Library not loaded` error until `brew install libomp` is run
+separately. Not expected to affect CI (`ubuntu-latest` runners typically
+have `libgomp1` already present), but documented in the README's setup
+instructions since it's a real, non-obvious local dev requirement.

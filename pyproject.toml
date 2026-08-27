@@ -10,6 +10,8 @@ dependencies = [
     "pyarrow>=16.0",
     "requests>=2.31",
     "matplotlib>=3.9",
+    "lightgbm>=4.0",
+    "scikit-learn>=1.4",
 ]
 
 [project.optional-dependencies]
