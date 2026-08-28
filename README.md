@@ -113,6 +113,40 @@ with a large evening price spike over £550/MWh): regenerate with
 Full reasoning for every metric definition and the failure-isolation
 approach: [ADR-012](DECISIONS.md#adr-012-resultspy--discharge-based-cyclesday-per-day-failure-isolation-a-full-year-fetched-for-credibility).
 
+### Tier 2 — MPC with a learned forecast, no perfect foresight
+
+Same battery, same real data, but the optimiser only ever sees a
+LightGBM-forecasted price path, never the real future. An 80/20
+chronological split trains the forecaster on the earlier ~80% of the year
+and backtests MPC only on the later, held-out ~72 days it never saw
+during training:
+
+| Strategy | Total profit (held-out 71.6 days) |
+|---|---|
+| Tier 1 ceiling (perfect foresight, same window) | £485.43 |
+| **MPC (Tier 2)** | **£335.62 (69.1% of ceiling)** |
+| Naive baseline | £243.04 |
+| MPC with a deliberately corrupted forecast | **-£308.53** |
+
+![Tier 1 vs MPC vs naive](results/tier2_comparison.png)
+
+MPC clearly beats naive (~38% more profit) while giving up about 31% of
+the theoretical ceiling to the fact that it can't actually see the
+future — a believable, honest result for a realistic controller. The
+corrupted-forecast row is the sanity check that matters most: feeding MPC
+a forecast deliberately decoupled from reality doesn't just make it worse
+than naive, it goes sharply negative — a broken forecast actively costs
+money rather than mysteriously still working, which is the strongest
+available evidence against a leak in the SoC handoff or feature matrix.
+
+The Tier 1 "ceiling" here is *not* the per-day-cyclic number from the
+table above — it's a single non-cyclic solve over the whole continuous
+test window, matching MPC's own structural freedom to carry SoC across a
+day boundary. An earlier version of this comparison used the per-day
+number directly and a test caught MPC legitimately exceeding it — full
+story in
+[ADR-017](DECISIONS.md#adr-017-results_tier2py--chronological-traintest-split-and-a-same-structure-ceiling).
+
 ## Project layout
 
 ```
@@ -128,7 +162,7 @@ bess/
     features.py          Tier 2: leakage-safe lag/calendar/rolling feature matrix
     forecaster.py         Tier 2: LightGBM price forecaster, one model per horizon
     mpc.py                 Tier 2: rolling-horizon controller, forecast-driven
-    results_tier2.py       Tier 2: MPC backtest + comparison            [pending]
+    results_tier2.py       Tier 2: MPC backtest, ceiling/floor comparison, plot
 tests/
     test_schema.py
     test_config.py
@@ -141,6 +175,7 @@ tests/
     test_tier2_features.py
     test_tier2_forecaster.py
     test_tier2_mpc.py
+    test_tier2_results.py
     fixtures/           recorded real API responses used by test_sources_elexon.py
 data/                   parquet cache (gitignored — regenerable via pipeline.py)
 results/                generated plots (gitignored — regenerable via results.py)
@@ -188,4 +223,6 @@ brew install libomp
 - [x] Part 1 — features (`features.py`) — see [ADR-014](DECISIONS.md#adr-014-featurespy--drop-warm-up-rows-rather-than-impute-and-a-black-box-leakage-guard)
 - [x] Part 2 — forecaster (`forecaster.py`) — see [ADR-015](DECISIONS.md#adr-015-forecasterpy--direct-multi-horizon-models-and-a-real-degradation-finding)
 - [x] Part 3 — MPC controller (`mpc.py`) — see [ADR-016](DECISIONS.md#adr-016-mpcpy--extending-solve_day-for-reuse-the-soc-handoff-discipline-and-a-static-forecast-deferral-finding)
-- [ ] Part 4 — results + corrupted-forecast sanity check (`results_tier2.py`)
+- [x] Part 4 — results + corrupted-forecast sanity check (`results_tier2.py`) — see [ADR-017](DECISIONS.md#adr-017-results_tier2py--chronological-traintest-split-and-a-same-structure-ceiling)
+
+**Tier 2 is now feature-complete: features → forecaster → MPC → backtest & sanity check, all built and verified against real data.**

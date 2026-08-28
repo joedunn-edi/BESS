@@ -886,3 +886,75 @@ stage-4.
 horizon models takes ~6s, and MPC over a 2-day real slice runs at
 ~22ms/period, projecting to roughly 6 minutes for the full cached year
 (run in the background in results_tier2.py, not synchronously).
+
+## ADR-017: results_tier2.py — chronological train/test split, and a same-structure ceiling
+
+**Status:** Accepted (Tier 2, part 4)
+
+**Context:** the final comparison needed two things pinned down beyond
+what the brief specified directly: whether the forecaster backtesting MPC
+should ever see the period it's scored on, and — discovered only once
+real testing began — whether Tier 1's existing per-day-cyclic total is
+actually a valid ceiling to compare a continuous MPC run against.
+
+**Decision, part 1 — an 80/20 chronological train/test split, not
+in-sample.** `chronological_train_test_split()` trains the forecaster
+only on the earlier 80% of the feature history and backtests MPC only on
+the later, held-out 20%. Training and scoring on the same year would let
+the model effectively memorise that year's specific patterns, inflating
+MPC's apparent performance in a way a genuinely new deployment wouldn't
+reproduce — the same leakage concern as ADR-014, one level up (at the
+training-set boundary rather than the per-row feature boundary).
+
+**Decision, part 2 — a real bug found while testing, not assumed away:
+the "ceiling" must be a single non-cyclic solve over the whole continuous
+test window, not the existing per-day-cyclic Tier 1 total.** The first
+implementation reused `run_tier1_over_history()` (per-calendar-day,
+forced back to `boundary_soc` every day, ADR-009) directly as "the
+ceiling." A synthetic test caught this immediately: MPC's continuous,
+non-cyclic run genuinely beat that number, because MPC can carry SoC
+across a day boundary when profitable and a cyclic-per-day Tier 1
+structurally cannot — meaning the per-day total was never a true upper
+bound on what MPC could achieve, only on what a cyclic-per-day strategy
+could. Fixed by computing the ceiling as one `solve_day(..., cyclic=False)`
+call over the entire test window at once, with the same starting SoC MPC
+uses — perfect foresight and the same structural freedom (no forced
+resets) as MPC, differing from it only in whether the price vector is
+real or forecasted. The naive floor keeps its existing per-day-cyclic
+structure unchanged: it's a simple reference strategy, not a bound that
+must never be violated, so it doesn't need matching MPC's freedom the way
+a true ceiling does.
+
+**Decision, part 3 — the corrupted-forecast check substitutes a
+randomly-chosen OTHER row's real features, rather than injecting noise.**
+`_ShuffledForecaster` still calls the real, trained model — just on a
+random different row's genuine historical features instead of the actual
+current one. This keeps predictions realistic in scale and distribution
+(never an out-of-range value that might trip some unrelated effect) while
+completely destroying any correlation between the forecast and the actual
+situation. If MPC's performance doesn't collapse toward the naive floor
+under this corruption, the good performance isn't coming from the
+forecast — meaning a leak exists in the SoC handoff (ADR-016) or the
+feature matrix (ADR-014) that this check is specifically positioned to
+catch.
+
+**Consequences — real results, 80/20 chronological split, held-out test
+period of 71.6 days, battery: 100 kWh / 50 kW / 90% RTE / SoC 5-95% /
+£0.01/kWh degradation, horizon=12:**
+
+| Strategy | Total profit (held-out period) |
+|---|---|
+| Tier 1 ceiling (perfect foresight, non-cyclic, same window) | £485.43 |
+| MPC (Tier 2, learned forecast) | £335.62 (69.1% of ceiling) |
+| Naive baseline | £243.04 |
+| MPC, corrupted forecast (sanity check) | **-£308.53** |
+
+The ordering naive < MPC < ceiling holds exactly as expected once the
+ceiling was fixed to match MPC's own structural freedom (part 2). The
+corrupted-forecast result is the important one: performance doesn't just
+drop below naive, it goes sharply negative — a forecast decoupled from
+reality doesn't merely fail to help, it actively costs money (paying to
+charge/discharge on wrong information), which is exactly the signature
+you want from a controller that's genuinely using its forecast rather
+than getting lucky some other way. No indication of a leak in the SoC
+handoff or feature matrix.
