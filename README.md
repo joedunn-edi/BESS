@@ -127,7 +127,7 @@ bess/
     results.py          runs Tier 1 over cached history, metrics, example-day plot
     features.py          Tier 2: leakage-safe lag/calendar/rolling feature matrix
     forecaster.py         Tier 2: LightGBM price forecaster, one model per horizon
-    mpc.py                 Tier 2: rolling-horizon controller           [pending]
+    mpc.py                 Tier 2: rolling-horizon controller, forecast-driven
     results_tier2.py       Tier 2: MPC backtest + comparison            [pending]
 tests/
     test_schema.py
@@ -140,6 +140,7 @@ tests/
     test_results.py
     test_tier2_features.py
     test_tier2_forecaster.py
+    test_tier2_mpc.py
     fixtures/           recorded real API responses used by test_sources_elexon.py
 data/                   parquet cache (gitignored — regenerable via pipeline.py)
 results/                generated plots (gitignored — regenerable via results.py)
@@ -186,5 +187,5 @@ brew install libomp
 
 - [x] Part 1 — features (`features.py`) — see [ADR-014](DECISIONS.md#adr-014-featurespy--drop-warm-up-rows-rather-than-impute-and-a-black-box-leakage-guard)
 - [x] Part 2 — forecaster (`forecaster.py`) — see [ADR-015](DECISIONS.md#adr-015-forecasterpy--direct-multi-horizon-models-and-a-real-degradation-finding)
-- [ ] Part 3 — MPC controller (`mpc.py`)
+- [x] Part 3 — MPC controller (`mpc.py`) — see [ADR-016](DECISIONS.md#adr-016-mpcpy--extending-solve_day-for-reuse-the-soc-handoff-discipline-and-a-static-forecast-deferral-finding)
 - [ ] Part 4 — results + corrupted-forecast sanity check (`results_tier2.py`)

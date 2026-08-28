@@ -798,6 +798,91 @@ forecaster would likely stop helping.
 runtime (`libomp`) on macOS, not installed by default with Homebrew
 Python — `pip install` succeeds but the import fails with a
 `dlopen`/`Library not loaded` error until `brew install libomp` is run
-separately. Not expected to affect CI (`ubuntu-latest` runners typically
-have `libgomp1` already present), but documented in the README's setup
-instructions since it's a real, non-obvious local dev requirement.
+separately. Verified directly (not just assumed) that this does NOT
+affect Linux: ran the full suite inside a genuine `ubuntu` Docker
+container with no extra system packages beyond `python3`/`pip`, and all
+100 tests passed — confirming CI (`ubuntu-latest`) needs no changes.
+
+## ADR-016: mpc.py — extending solve_day() for reuse, the SoC-handoff discipline, and a static-forecast deferral finding
+
+**Status:** Accepted (Tier 2, part 3)
+
+**Context:** `mpc.py` needs to solve a short, partial-window LP at every
+period using forecasted prices, starting from the battery's real current
+SoC — but `solve_day()` (Tier 1) always requires the whole-day cyclic
+boundary (`soc[T] == soc[0]`) and only accepts a starting SoC expressed as
+a fraction of capacity. Reusing it required extending it, not
+duplicating it.
+
+**Decision, part 1 — extended `solve_day()` with two new optional
+parameters, both defaulting to Tier 1's existing behaviour exactly.**
+`cyclic: bool = True` makes the `soc[T] == soc[0]` constraint conditional
+— MPC passes `cyclic=False` for its non-cyclic partial windows.
+`initial_soc_kwh: float | None = None` lets a caller hand the LP a
+starting SoC directly in kWh, overriding `boundary_soc` for the starting
+condition only — MPC's real current SoC is a genuine kWh figure produced
+by the simulator, not a clean fraction of capacity, and forcing it
+through a fraction round-trip would reintroduce exactly the kind of
+fraction-vs-kWh confusion already flagged as a real risk in the stage-4
+quiz. Every existing Tier 1 call site (results.py, naive_baseline.py, the
+whole Tier 1 test suite) leaves both parameters at their defaults and is
+unaffected — verified by running the full pre-existing suite unchanged
+after this edit, not just by inspection.
+
+**Decision, part 2 — the SoC handed from one MPC step to the next is
+always `backtest.simulate()`'s own recomputed value, never
+`schedule.soc_kwh[1]` from the LP's internal solve.** This is the
+single load-bearing discipline of the whole module, exactly as flagged in
+the brief: the LP's `soc_kwh` trajectory reflects the *forecast*, not
+reality, so reading it back as the "current" SoC would silently let
+forecast-based (not real) information flow into the next decision —
+foresight leaking in through the back door of the state variable rather
+than the feature matrix. `run_mpc()` only ever reads `schedule.charge_kw[0]`
+and `schedule.discharge_kw[0]` (the decision) from each solve, and
+recomputes what actually happened via `simulate()` against the real
+realised price, independently.
+
+**Decision, part 3 (a bug found while testing, not a modelling choice) —
+`solve_day()`'s starting-SoC bounds check needed a small tolerance.**
+Chaining many `solve_day()` calls, each seeded from the previous call's
+real, simulator-computed SoC, accumulates floating-point drift that can
+produce a value like `-1e-15` at a boundary that is genuinely zero but
+not bit-exact. Tier 1's single-solve-per-day usage never chains calls
+this way, so this never surfaced before MPC existed. Fixed with the same
+`1e-6` tolerance pattern already used in `backtest.py`, plus clipping the
+value to the exact bounds before it reaches the LP's own declared
+variable bounds (a within-tolerance-but-marginally-outside value pinned
+via an equality constraint could otherwise make the LP itself infeasible
+even after the tolerance check accepts it).
+
+**Finding — a static (non-time-varying) forecast causes MPC to defer a
+profitable action forever, and that's correct, not a bug.** Discovered
+while building the hand-computable test: if the forecaster's prediction
+never changes from step to step, and the LP's optimal plan for "period 0
+of the window" is to wait for a better price at "period 1," then MPC —
+which only ever executes period 0's decision — re-derives the identical
+"wait" decision every single step, since the real SoC never changes
+either. The profitable sale never happens. This is a property of
+rolling-horizon control fed an unchanging forecast, not a defect in the
+loop: a real, time-varying forecaster (forecaster.py) doesn't exhibit it,
+because its prediction genuinely updates as real information arrives each
+step. Confirmed the loop isn't inherently paralysis-prone with a second
+hand-computed case (forecast favouring the *immediate* period) that does
+act immediately, and separately confirmed real full-year MPC runs produce
+active cycling, not paralysis (results_tier2.py).
+
+**Also verified directly rather than assumed:** the non-cyclic window's
+"liquidate everything by the window's end regardless of price level"
+behaviour — since unsold energy at a window's edge is credited zero value
+in that solve's objective, the LP prefers selling at even a "cheap"
+forecast price over holding stock past the window boundary. An earlier
+draft of the hand-computable test got this wrong by intuition alone and
+was corrected against `solve_day()`'s actual output before being written
+down — the same "verify by hand against the real function before trusting
+the number" discipline as the Tier 1 hand-computed test in ADR post
+stage-4.
+
+**Consequences:** end-to-end wiring verified on real data — training 12
+horizon models takes ~6s, and MPC over a 2-day real slice runs at
+~22ms/period, projecting to roughly 6 minutes for the full cached year
+(run in the background in results_tier2.py, not synchronously).

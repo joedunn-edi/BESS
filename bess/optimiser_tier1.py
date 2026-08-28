@@ -83,11 +83,17 @@ class Tier1Schedule:
     status: str
 
 
-def solve_day(prices: np.ndarray, battery: Battery, boundary_soc: float = 0.5) -> Tier1Schedule:
+def solve_day(
+    prices: np.ndarray,
+    battery: Battery,
+    boundary_soc: float = 0.5,
+    cyclic: bool = True,
+    initial_soc_kwh: float | None = None,
+) -> Tier1Schedule:
     """
-    Solve the Tier 1 MILP for one day given its price vector (£/kWh, one
-    entry per settlement period, in chronological order). See the module
-    docstring for the full formulation.
+    Solve the Tier 1 MILP for a price vector (£/kWh, one entry per
+    settlement period, in chronological order). See the module docstring
+    for the full formulation.
 
     boundary_soc (fraction of capacity_kwh, default 0.5) is the shared,
     fixed start-of-day/end-of-day SoC — not a free decision variable. 0.5
@@ -96,16 +102,46 @@ def solve_day(prices: np.ndarray, battery: Battery, boundary_soc: float = 0.5) -
     over-charge and over-discharge stress). This is flagged in ADR-009 for
     a sensitivity check (e.g. 0.25/0.5/0.75) over the full cached history in
     stage 7, rather than treated as beyond question.
+
+    cyclic (default True) requires soc[T] == soc[0] — Tier 1's whole-day
+    assumption. mpc.py (Tier 2) solves short, partial-day windows against
+    forecasted prices and must NOT force a return to any particular SoC
+    mid-window; only a genuine day boundary would justify that, and MPC
+    doesn't currently impose one. Every existing call site leaves this at
+    the default, so this parameter changes no prior behaviour (ADR-016).
+
+    initial_soc_kwh, if given, overrides boundary_soc for the STARTING
+    condition only, in absolute kWh rather than a fraction of capacity —
+    used by mpc.py to hand the LP the battery's real, simulator-computed
+    current SoC directly, without a needless fraction<->kWh round trip
+    (config.py's fraction-based SoC vs the LP's own kWh-based decision
+    variables have already been a real source of confusion once — see the
+    stage-4 quiz). If cyclic=True and initial_soc_kwh is given, the end
+    condition targets *this* value, not boundary_soc*capacity_kwh.
     """
     T = len(prices)
     soc_min_kwh = battery.soc_min * battery.capacity_kwh
     soc_max_kwh = battery.soc_max * battery.capacity_kwh
-    boundary_soc_kwh = boundary_soc * battery.capacity_kwh
-    if not (soc_min_kwh <= boundary_soc_kwh <= soc_max_kwh):
+    start_soc_kwh = boundary_soc * battery.capacity_kwh if initial_soc_kwh is None else initial_soc_kwh
+
+    # a small tolerance, not a strict bounds check: mpc.py chains many
+    # solve_day() calls, each seeded from the previous call's real,
+    # simulator-computed SoC (see ADR-016) — floating-point drift across
+    # many iterations can produce a value like -1e-15 that is genuinely
+    # at the boundary but not bit-exact. Tier 1's own single-solve-per-day
+    # usage never chains calls this way, so this never surfaced there.
+    _BOUNDARY_TOLERANCE = 1e-6
+    if not (soc_min_kwh - _BOUNDARY_TOLERANCE <= start_soc_kwh <= soc_max_kwh + _BOUNDARY_TOLERANCE):
         raise ValueError(
-            f"boundary_soc={boundary_soc} ({boundary_soc_kwh:.2f} kWh) is outside "
+            f"starting SoC {start_soc_kwh:.2f} kWh is outside "
             f"[soc_min, soc_max] = [{soc_min_kwh:.2f}, {soc_max_kwh:.2f}] kWh"
         )
+    # clip to the exact bounds before handing to the LP: soc[0]'s own
+    # declared bounds are [soc_min_kwh, soc_max_kwh] exactly, and a
+    # within-tolerance-but-marginally-outside value (e.g. -1e-15) pinned
+    # via an equality constraint could make the LP itself infeasible even
+    # though the tolerance check above accepted it.
+    start_soc_kwh = min(max(start_soc_kwh, soc_min_kwh), soc_max_kwh)
 
     problem = pulp.LpProblem("tier1_arbitrage", pulp.LpMaximize)
 
@@ -114,8 +150,9 @@ def solve_day(prices: np.ndarray, battery: Battery, boundary_soc: float = 0.5) -
     is_charging = pulp.LpVariable.dicts("is_charging", range(T), cat="Binary")
     soc = pulp.LpVariable.dicts("soc_kwh", range(T + 1), lowBound=soc_min_kwh, upBound=soc_max_kwh)
 
-    problem += soc[0] == boundary_soc_kwh
-    problem += soc[T] == soc[0]  # cyclic end-of-day constraint
+    problem += soc[0] == start_soc_kwh
+    if cyclic:
+        problem += soc[T] == soc[0]
 
     for t in range(T):
         problem += charge[t] <= battery.power_kw * is_charging[t]

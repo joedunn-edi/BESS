@@ -91,8 +91,59 @@ def test_respects_power_limits():
 
 def test_raises_when_boundary_soc_outside_bounds():
     battery = _battery(soc_min=0.2, soc_max=0.8)
-    with pytest.raises(ValueError, match="boundary_soc"):
+    with pytest.raises(ValueError, match="starting SoC"):
         solve_day(np.array([0.1, 0.2]), battery, boundary_soc=0.9)
+
+
+# --- cyclic=False and initial_soc_kwh (added for mpc.py, Tier 2) ----------------
+
+
+def test_non_cyclic_allows_ending_soc_to_differ_from_start():
+    # cheap-then-expensive: with no cyclic constraint, the optimal move is
+    # to charge fully and discharge only partially (or not at all) if that
+    # nets more value than returning to the start — here, simply charging
+    # once and never discharging back down is optimal since there's only
+    # one expensive period and it's better spent partially, but the key
+    # assertion is just that ending SoC is free to differ from the start.
+    prices = np.array([0.05, 0.05, 0.20])
+    battery = _battery(degradation_cost_per_kwh=0.0)
+
+    result = solve_day(prices, battery, boundary_soc=0.5, cyclic=False)
+
+    assert result.status == "Optimal"
+    # with no obligation to return to 5 kWh, the LP is free to end
+    # anywhere within bounds — assert it actually differs from start,
+    # proving the cyclic constraint really is absent, not just unused
+    assert result.soc_kwh[-1] != pytest.approx(result.soc_kwh[0])
+
+
+def test_cyclic_still_forces_return_to_start_by_default():
+    prices = np.array([0.05, 0.05, 0.20])
+    battery = _battery(degradation_cost_per_kwh=0.0)
+
+    result = solve_day(prices, battery, boundary_soc=0.5)  # cyclic=True default
+
+    assert result.soc_kwh[-1] == pytest.approx(result.soc_kwh[0], abs=1e-6)
+
+
+def test_initial_soc_kwh_overrides_boundary_soc_for_start_only():
+    prices = np.array([0.05, 0.20])
+    battery = _battery()
+
+    # boundary_soc would give 5.0 kWh; initial_soc_kwh should win instead
+    result = solve_day(prices, battery, boundary_soc=0.5, cyclic=False, initial_soc_kwh=8.0)
+
+    assert result.soc_kwh[0] == pytest.approx(8.0)
+
+
+def test_initial_soc_kwh_with_cyclic_targets_itself_not_boundary_soc():
+    prices = np.array([0.05, 0.20])
+    battery = _battery()
+
+    result = solve_day(prices, battery, boundary_soc=0.5, cyclic=True, initial_soc_kwh=7.0)
+
+    assert result.soc_kwh[0] == pytest.approx(7.0)
+    assert result.soc_kwh[-1] == pytest.approx(7.0, abs=1e-6)  # cyclic targets 7.0, not 5.0
 
 
 # --- economic sanity checks ------------------------------------------------------
