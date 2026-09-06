@@ -56,7 +56,7 @@ def _raise_if_empty(records: list[dict], settlement_date: date, source: str) -> 
 
 
 def _raise_if_all_zero(prices: pd.DataFrame, settlement_date: date, source: str) -> None:
-    if (prices["price_gbp_per_kwh"] == 0).all():
+    if (prices["price_per_kwh"] == 0).all():
         raise AllZeroPriceSeriesError(f"{source}: all-zero price series for {settlement_date}")
 
 
@@ -91,7 +91,9 @@ def fetch_imbalance_prices(settlement_date: date, session: requests.Session = re
             "timestamp_utc": pd.to_datetime([r["startTime"] for r in records], utc=True),
             "settlement_date": pd.to_datetime([r["settlementDate"] for r in records]),
             "settlement_period": np.array([r["settlementPeriod"] for r in records], dtype="int64"),
-            "price_gbp_per_kwh": np.array([r["systemSellPrice"] for r in records], dtype="float64") / 1000,
+            "period_minutes": np.full(len(records), 30, dtype="int64"),
+            "price_per_kwh": np.array([r["systemSellPrice"] for r in records], dtype="float64") / 1000,
+            "currency": "GBP",
             "source": SOURCE_IMBALANCE,
         }
     )
@@ -141,7 +143,9 @@ def fetch_day_ahead_prices(settlement_date: date, session: requests.Session = re
             "timestamp_utc": pd.to_datetime([r["startTime"] for r in records], utc=True),
             "settlement_date": pd.to_datetime([r["settlementDate"] for r in records]),
             "settlement_period": np.array([r["settlementPeriod"] for r in records], dtype="int64"),
-            "price_gbp_per_kwh": np.array([r["price"] for r in records], dtype="float64") / 1000,
+            "period_minutes": np.full(len(records), 30, dtype="int64"),
+            "price_per_kwh": np.array([r["price"] for r in records], dtype="float64") / 1000,
+            "currency": "GBP",
             "source": SOURCE_DAY_AHEAD,
         }
     )

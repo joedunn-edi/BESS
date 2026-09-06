@@ -113,7 +113,7 @@ def test_naive_sits_below_tier1_on_real_data():
 
     for _, day in df.groupby("settlement_date"):
         day = day.sort_values("settlement_period")
-        prices = day["price_gbp_per_kwh"].to_numpy()
+        prices = day["price_per_kwh"].to_numpy()
 
         tier1_schedule = solve_day(prices, battery, boundary_soc=0.5)
         naive_schedule = solve_day_naive(prices, battery, boundary_soc=0.5)

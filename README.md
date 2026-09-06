@@ -153,8 +153,9 @@ story in
 bess/
     schema.py           canonical data contract + validate() + full_grid()
     config.py           Battery dataclass (hardware/economic parameters)
-    sources_elexon.py   Elexon BMRS fetchers (imbalance + day-ahead)
-    pipeline.py         fetch -> gap-report -> cache (parquet)
+    sources_elexon.py   Elexon BMRS fetchers (imbalance + day-ahead), GBP
+    sources_ercot.py    ERCOT DAM/RTM fetchers (HB_WEST), USD          [new — see ADR-018]
+    pipeline.py         fetch -> gap-report -> cache (parquet), multi-market
     optimiser_tier1.py  MILP scheduler, one day, perfect foresight
     backtest.py         independent SoC/cashflow simulator, cross-checks the LP
     naive_baseline.py   charge-cheapest/discharge-priciest floor for comparison
@@ -167,6 +168,7 @@ tests/
     test_schema.py
     test_config.py
     test_sources_elexon.py
+    test_sources_ercot.py
     test_pipeline.py
     test_optimiser_tier1.py
     test_backtest.py
@@ -224,5 +226,11 @@ brew install libomp
 - [x] Part 2 — forecaster (`forecaster.py`) — see [ADR-015](DECISIONS.md#adr-015-forecasterpy--direct-multi-horizon-models-and-a-real-degradation-finding)
 - [x] Part 3 — MPC controller (`mpc.py`) — see [ADR-016](DECISIONS.md#adr-016-mpcpy--extending-solve_day-for-reuse-the-soc-handoff-discipline-and-a-static-forecast-deferral-finding)
 - [x] Part 4 — results + corrupted-forecast sanity check (`results_tier2.py`) — see [ADR-017](DECISIONS.md#adr-017-results_tier2py--chronological-traintest-split-and-a-same-structure-ceiling)
+
+**Multi-market extension — ERCOT (Texas), West Hub:**
+
+- [x] Contracts + fetchers (`schema.py` generalised, `sources_ercot.py`, `pipeline.py` wrappers) — see [ADR-018](DECISIONS.md#adr-018-schemapy-multi-market-generalisation-and-choosing-hb_west-over-a-system-wide-average)
+- [ ] Point Tier 1/Tier 2 at ERCOT data — not started
+- ⚠️ `sources_ercot.py`'s exact field-name casing is unverified against a live response (no registered ERCOT account) — endpoints, auth flow, and query parameters are cross-checked against the `gridstatus` open-source library and trusted; field names are marked `VERIFY` in the module and need confirming against a real API call before production use
 
 **Tier 2 is now feature-complete: features → forecaster → MPC → backtest & sanity check, all built and verified against real data.**

@@ -28,7 +28,9 @@ def _day_frame(d: date, prices: list[float], source: str = "test") -> pd.DataFra
             "timestamp_utc": pd.to_datetime(timestamps, utc=True),
             "settlement_date": pd.Series([pd.Timestamp(d)] * n, dtype="datetime64[ns]"),
             "settlement_period": np.arange(1, n + 1, dtype="int64"),
-            "price_gbp_per_kwh": np.array(prices, dtype="float64"),
+            "period_minutes": np.full(n, 30, dtype="int64"),
+            "price_per_kwh": np.array(prices, dtype="float64"),
+            "currency": "GBP",
             "source": source,
         }
     )

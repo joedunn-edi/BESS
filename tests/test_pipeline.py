@@ -17,9 +17,12 @@ import pytest
 from bess.pipeline import (
     DataQualityReport,
     GapThresholdExceededError,
+    run_ercot_dam_pipeline,
+    run_ercot_rtm_pipeline,
     run_pipeline,
 )
 from bess.schema import expected_period_count, settlement_day_utc_bounds, validate
+from bess.sources_ercot import ErcotToken
 
 
 def _day_frame(
@@ -36,7 +39,9 @@ def _day_frame(
             "timestamp_utc": pd.to_datetime(timestamps, utc=True),
             "settlement_date": pd.Series([pd.Timestamp(d)] * len(periods), dtype="datetime64[ns]"),
             "settlement_period": np.array(periods, dtype="int64"),
-            "price_gbp_per_kwh": prices,
+            "period_minutes": np.full(len(periods), 30, dtype="int64"),
+            "price_per_kwh": prices,
+            "currency": "GBP",
             "source": source,
         }
     )
@@ -215,4 +220,82 @@ def test_rerun_with_revised_prices_overwrites_cached_values(tmp_path):
     combined, _ = run_pipeline(lambda _d: _day_frame(_d, price=0.20), d, d, source="test", cache_path=cache_path)
 
     assert len(combined) == 48  # no duplicate rows after the re-fetch
-    assert (combined["price_gbp_per_kwh"] == 0.20).all()  # freshest fetch wins
+    assert (combined["price_per_kwh"] == 0.20).all()  # freshest fetch wins
+
+
+# --- ERCOT wrappers (fake session, since we have no registered account) -----------
+
+
+class _FakeErcotResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+class _FakeErcotSession:
+    """Returns one full day's worth of records regardless of request args."""
+
+    def __init__(self, records: list[dict]):
+        self._records = records
+
+    def get(self, *args, **kwargs):
+        return _FakeErcotResponse({"data": self._records})
+
+
+def _dam_day_records(delivery_date: str, price: float = 0.10) -> list[dict]:
+    return [
+        {
+            "deliveryDate": delivery_date,
+            "hourEnding": h,
+            "settlementPoint": "HB_WEST",
+            "settlementPointPrice": price,
+            "DSTFlag": "N",
+        }
+        for h in range(1, 25)
+    ]
+
+
+def test_run_ercot_dam_pipeline_caches_hourly_chicago_data(tmp_path):
+    d = date(2026, 7, 15)
+    token = ErcotToken(id_token="fake", subscription_key="fake")
+    session = _FakeErcotSession(_dam_day_records(d.isoformat()))
+
+    combined, report = run_ercot_dam_pipeline(
+        d, d, token=token, cache_path=tmp_path / "ercot_dam.parquet", session=session
+    )
+
+    assert len(combined) == 24
+    assert (combined["period_minutes"] == 60).all()
+    assert (combined["currency"] == "USD").all()
+    assert report.n_missing_periods == 0
+
+
+def test_run_ercot_rtm_pipeline_caches_15_minute_chicago_data(tmp_path):
+    d = date(2026, 7, 15)
+    token = ErcotToken(id_token="fake", subscription_key="fake")
+    records = [
+        {
+            "deliveryDate": d.isoformat(),
+            "hourEnding": h,
+            "deliveryInterval": i,
+            "settlementPoint": "HB_WEST",
+            "settlementPointPrice": 0.10,
+            "DSTFlag": "N",
+        }
+        for h in range(1, 25)
+        for i in range(1, 5)
+    ]
+    session = _FakeErcotSession(records)
+
+    combined, report = run_ercot_rtm_pipeline(
+        d, d, token=token, cache_path=tmp_path / "ercot_rtm.parquet", session=session
+    )
+
+    assert len(combined) == 96
+    assert (combined["period_minutes"] == 15).all()
+    assert report.n_missing_periods == 0

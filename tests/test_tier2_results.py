@@ -34,7 +34,9 @@ def _synthetic_price_history(n_days: int, price_fn) -> pd.DataFrame:
                     "timestamp_utc": start_utc + timedelta(minutes=30 * (period - 1)),
                     "settlement_date": pd.Timestamp(d),
                     "settlement_period": period,
-                    "price_gbp_per_kwh": price_fn(idx),
+                    "period_minutes": 30,
+                    "price_per_kwh": price_fn(idx),
+                    "currency": "GBP",
                     "source": "test",
                 }
             )
@@ -42,7 +44,8 @@ def _synthetic_price_history(n_days: int, price_fn) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True)
     df["settlement_period"] = df["settlement_period"].astype("int64")
-    df["price_gbp_per_kwh"] = df["price_gbp_per_kwh"].astype("float64")
+    df["period_minutes"] = df["period_minutes"].astype("int64")
+    df["price_per_kwh"] = df["price_per_kwh"].astype("float64")
     return validate(df)
 
 

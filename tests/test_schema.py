@@ -35,7 +35,9 @@ def _valid_frame(n_periods: int = 4, settlement_date: str = "2026-07-22") -> pd.
             # contract in EXPECTED_DTYPES — see schema.py's dtype checks.
             "settlement_date": pd.Series([pd.Timestamp(settlement_date)] * n_periods, dtype="datetime64[ns]"),
             "settlement_period": np.arange(1, n_periods + 1, dtype="int64"),
-            "price_gbp_per_kwh": np.linspace(0.10, 0.20, n_periods),
+            "period_minutes": np.full(n_periods, 30, dtype="int64"),
+            "price_per_kwh": np.linspace(0.10, 0.20, n_periods),
+            "currency": "GBP",
             "source": "test",
         }
     )
@@ -93,11 +95,15 @@ def test_full_grid_spans_dst_transition_with_correct_total():
 
 
 def test_full_grid_is_schema_shaped_minus_price_and_source():
+    # period_minutes IS included (it's a calendar/structural fact, like
+    # settlement_period, not a data value like price/currency/source)
     grid = full_grid(date(2026, 7, 15), date(2026, 7, 15))
-    assert list(grid.columns) == ["timestamp_utc", "settlement_date", "settlement_period"]
+    assert list(grid.columns) == ["timestamp_utc", "settlement_date", "settlement_period", "period_minutes"]
     assert str(grid["timestamp_utc"].dtype) == "datetime64[ns, UTC]"
     assert str(grid["settlement_date"].dtype) == "datetime64[ns]"
     assert str(grid["settlement_period"].dtype) == "int64"
+    assert str(grid["period_minutes"].dtype) == "int64"
+    assert (grid["period_minutes"] == 30).all()
 
 
 # --- validate(): happy path --------------------------------------------------
@@ -136,8 +142,8 @@ def test_validate_rejects_non_utc_timezone():
 
 def test_validate_rejects_nan_price():
     df = _valid_frame()
-    df.loc[1, "price_gbp_per_kwh"] = np.nan
-    with pytest.raises(SchemaValidationError, match="price_gbp_per_kwh"):
+    df.loc[1, "price_per_kwh"] = np.nan
+    with pytest.raises(SchemaValidationError, match="price_per_kwh"):
         validate(df)
 
 

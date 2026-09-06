@@ -76,7 +76,7 @@ def run_tier1_over_history(price_history: pd.DataFrame, battery: Battery, bounda
     for settlement_date, day_df in price_history.groupby("settlement_date"):
         d = settlement_date.date()
         day_df = day_df.sort_values("settlement_period")
-        prices = day_df["price_gbp_per_kwh"].to_numpy()
+        prices = day_df["price_per_kwh"].to_numpy()
 
         try:
             schedule = solve_day(prices, battery, boundary_soc=boundary_soc)

@@ -66,7 +66,7 @@ def test_fetch_imbalance_prices_parses_real_fixture():
     assert (result.prices["source"] == SOURCE_IMBALANCE).all()
     assert list(result.prices["settlement_period"]) == list(range(1, 49))
     first_raw = payload["data"][0]
-    assert result.prices.loc[0, "price_gbp_per_kwh"] == pytest.approx(first_raw["systemSellPrice"] / 1000)
+    assert result.prices.loc[0, "price_per_kwh"] == pytest.approx(first_raw["systemSellPrice"] / 1000)
 
 
 def test_fetch_imbalance_prices_quality_flags_align_with_prices():

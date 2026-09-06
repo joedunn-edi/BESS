@@ -34,7 +34,7 @@ import pandas as pd
 from sklearn.metrics import mean_absolute_error, root_mean_squared_error
 from sklearn.model_selection import TimeSeriesSplit
 
-TARGET_COLUMN = "price_gbp_per_kwh"
+TARGET_COLUMN = "price_per_kwh"
 NON_FEATURE_COLUMNS = ("timestamp_utc", TARGET_COLUMN)
 
 
@@ -67,7 +67,7 @@ def naive_forecast(features_df: pd.DataFrame, horizon: int) -> pd.Series:
     out the target is.
 
     Built from the already-computed `lag_48` column, not by re-shifting
-    `price_gbp_per_kwh` on this (already warm-up-truncated) frame: the
+    `price_per_kwh` on this (already warm-up-truncated) frame: the
     latter would needlessly reproduce NaNs for the first (horizon-1) rows
     that `lag_48` doesn't have, since `lag_48` was computed before the
     warm-up rows were dropped and every surviving row already has one.

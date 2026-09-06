@@ -958,3 +958,98 @@ charge/discharge on wrong information), which is exactly the signature
 you want from a controller that's genuinely using its forecast rather
 than getting lucky some other way. No indication of a leak in the SoC
 handoff or feature matrix.
+
+---
+
+## Multi-market extension — ERCOT (Texas), West Hub
+
+Everything before this point was GB-only. This section generalises the
+canonical schema to support a genuinely different market — different
+currency, different settlement grain, different timezone/DST calendar —
+and adds ERCOT's West trading hub (HB_WEST) as the first non-GB source.
+Tier 1/Tier 2 (the optimiser, forecaster, MPC) are not yet pointed at
+ERCOT data — this covers contracts and fetching only.
+
+## ADR-018: schema.py multi-market generalisation, and choosing HB_WEST over a system-wide average
+
+**Status:** Accepted
+
+**Context:** ERCOT differs from GB in four structural ways that the
+original schema, built GB-only, didn't need to represent: native currency
+(USD vs GBP), settlement grain (ERCOT's Day-Ahead Market is hourly, Real
+-Time Market is 15-minute — GB is uniformly half-hourly), timezone/DST
+calendar (America/Chicago, on US clock-change dates, not UK ones), and
+locational pricing (GB has one national price; ERCOT prices differ by
+settlement point/node).
+
+**Decision, part 1 — native currency, not FX-converted to GBP.** Added an
+explicit `currency` column rather than converting USD to GBP at ingest.
+Converting would require trusting a new external FX-rate data source and
+would bake currency fluctuation into what's supposed to be a signal about
+ERCOT's own price dynamics — a confound this project didn't need to
+accept. `price_gbp_per_kwh` renamed to `price_per_kwh` throughout the
+codebase to reflect this (a mechanical but wide rename — every module
+from `sources_elexon.py` through `results_tier2.py`, and every test).
+
+**Decision, part 2 — model each market at its own native grain.**
+`schema.py`'s timezone (`tz`) and period length (`period_minutes`) are now
+parameters on `settlement_day_utc_bounds()`, `expected_period_count()`,
+`full_grid()`, and `validate()`, defaulting to Europe/London and 30
+minutes so every existing GB call site is unchanged. The DST-window
+arithmetic itself (convert to UTC before subtracting, ADR-002) didn't need
+to change at all — only the hardcoded constants did. `period_minutes` is
+also now a column on the canonical schema itself (added to `full_grid()`'s
+skeleton, since it's a calendar/structural fact like `settlement_period`,
+not a data value like price) — added specifically so a row is
+self-describing about its own granularity, and `validate()` can catch a
+dataset that accidentally mixes granularities or currencies, rather than
+assuming each cached file stays internally homogeneous by convention alone.
+
+**Decision, part 3 — HB_WEST (a real trading hub), not a system-wide
+average.** The recommendation going in was a system-wide/hub-average
+price, as the closest single-number analogue to GB's one national price.
+Rejected on the same grounds this project has applied elsewhere (day
+-ahead over imbalance for Tier 1's realism, ADR-009): an average across
+the whole system is a synthetic number nobody actually settles at — a
+real battery sits at a real physical location and is paid that location's
+real price. West was chosen specifically over North/South/Houston for its
+heavy wind penetration and the resulting price volatility (lowest average
+prices in ERCOT, frequent negative pricing from local oversupply) — a
+more interesting arbitrage signal than North's closer-to-average, more
+GB-like profile, which was the alternative on the table.
+
+**Decision, part 4 (discovered during implementation, not decided in
+advance) — a genuinely different DST-handling approach was needed for
+ERCOT versus GB.** GB's `settlement_period` is already a real
+elapsed-time position (period 46 vs 48 on the spring clock-change day
+tells you directly how long the day was) — it never needed anything extra
+to handle DST. ERCOT reports hours in "Hour Ending" form and — cross
+-checked against the `gridstatus` open-source library, which already
+parses these same two endpoints in production, since we have no ERCOT
+account of our own to verify against live — publishes an explicit
+`DSTFlag` ("Y"/"N") specifically because its wall-clock hour label
+*repeats* on the US autumn clock-change day (the same "hourEnding" value
+appears twice). Computing an elapsed-hours offset directly from that label
+would silently get the repeated hour wrong. Fixed by sorting each day's
+raw records into true chronological order first (`DSTFlag` breaks the tie
+on the repeated hour) and assigning `settlement_period` by *position* in
+that sorted sequence — reusing the same "position-in-sequence, not label
+arithmetic" principle `schema.full_grid()` already relies on — rather than
+computing the period number from the hour label directly.
+
+**Consequences / what's confirmed vs. still open:** the base URL, both
+endpoint paths (`/np4-190-cd/dam_stlmnt_pnt_prices`,
+`/np6-905-cd/spp_node_zone_hub`), the token URL/OAuth flow, and the query
+parameters (`deliveryDateFrom`/`deliveryDateTo`, no settlement-point
+filter — every settlement point is returned and filtered client-side, the
+same pattern as `sources_elexon.py`'s day-ahead fetcher) are all
+cross-checked against `gridstatus`'s working source and are trusted. The
+*exact casing* of individual JSON field names in ERCOT's specific REST API
+responses is not independently verified — `sources_ercot.py` marks every
+such assumption `VERIFY` in its docstrings, and needs a live call against
+a real registered ERCOT account before being trusted in production, per
+the same "validate one real day before writing the parser" discipline
+`sources_elexon.py` was built with (ADR-007). The entire existing GB test
+suite (125 tests) passes unchanged after the schema generalisation — the
+new parameters' defaults exactly reproduce prior GB behaviour, confirmed
+directly by running the full suite before and after, not assumed.

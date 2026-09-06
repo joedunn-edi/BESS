@@ -32,13 +32,13 @@ def build_features(price_df: pd.DataFrame) -> pd.DataFrame:
     """
     Build the Tier 2 feature matrix from a canonical price DataFrame.
     Returns one row per period with a fully-populated feature set, plus
-    the actual price at t as `price_gbp_per_kwh` (the forecasting target,
+    the actual price at t as `price_per_kwh` (the forecasting target,
     not a feature — callers building X/y for training must exclude it
     from X). Rows without enough history for every lag/rolling feature
     are dropped entirely.
     """
     df = validate(price_df).reset_index(drop=True)
-    price = df["price_gbp_per_kwh"]
+    price = df["price_per_kwh"]
 
     features = pd.DataFrame(index=df.index)
     features["timestamp_utc"] = df["timestamp_utc"]
@@ -62,6 +62,6 @@ def build_features(price_df: pd.DataFrame) -> pd.DataFrame:
     features["day_of_week"] = day_of_week
     features["is_weekend"] = day_of_week.isin([5, 6])
 
-    features["price_gbp_per_kwh"] = price  # target, carried through — not a feature
+    features["price_per_kwh"] = price  # target, carried through — not a feature
 
     return features.dropna().reset_index(drop=True)

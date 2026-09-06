@@ -33,12 +33,14 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
 
-from bess.schema import CANONICAL_COLUMNS, EXPECTED_DTYPES, full_grid, validate
+from bess.schema import CANONICAL_COLUMNS, EXPECTED_DTYPES, LONDON, full_grid, validate
 from bess.sources_elexon import SOURCE_DAY_AHEAD, SOURCE_IMBALANCE, fetch_day_ahead_prices, fetch_imbalance_prices
+from bess.sources_ercot import CHICAGO, HUB, SOURCE_DAM, SOURCE_RTM, ErcotToken, fetch_dam_prices, fetch_rtm_prices
 
 _EMPTY_CANONICAL = pd.DataFrame({col: pd.Series([], dtype=dtype) for col, dtype in EXPECTED_DTYPES.items()})[
     CANONICAL_COLUMNS
@@ -141,10 +143,16 @@ def compute_quality_report(
     end_date: date,
     source: str,
     failed_fetch_dates: list[date] | None = None,
+    tz: ZoneInfo = LONDON,
+    period_minutes: int = 30,
 ) -> DataQualityReport:
     """Diff `fetched` against the complete expected grid and summarise gaps,
-    negative-price frequency, and price distribution. Never mutates `fetched`."""
-    grid = full_grid(start_date, end_date)
+    negative-price frequency, and price distribution. Never mutates `fetched`.
+
+    tz/period_minutes must match whatever market `fetched` actually came
+    from (default Europe/London, 30 — GB) so the expected grid lines up;
+    e.g. pass tz=CHICAGO, period_minutes=60 for ERCOT DAM data."""
+    grid = full_grid(start_date, end_date, tz=tz, period_minutes=period_minutes)
     present_keys = set(zip(fetched["settlement_date"].dt.date, fetched["settlement_period"]))
     missing_mask = _missing_mask(grid, present_keys)
 
@@ -155,8 +163,8 @@ def compute_quality_report(
         d: missing_mask.loc[day_grid.index].mean() for d, day_grid in grid.groupby(grid["settlement_date"].dt.date)
     }
 
-    negative_mask = fetched["price_gbp_per_kwh"] < 0
-    price_distribution = fetched["price_gbp_per_kwh"].describe().to_dict() if not fetched.empty else {}
+    negative_mask = fetched["price_per_kwh"] < 0
+    price_distribution = fetched["price_per_kwh"].describe().to_dict() if not fetched.empty else {}
 
     return DataQualityReport(
         source=source,
@@ -192,18 +200,18 @@ def _check_thresholds(
         )
 
 
-def _merge_with_cache(new_data: pd.DataFrame, cache_path: Path) -> pd.DataFrame:
+def _merge_with_cache(new_data: pd.DataFrame, cache_path: Path, tz: ZoneInfo = LONDON) -> pd.DataFrame:
     """Load an existing parquet cache (if any), merge in new_data, and keep
     the freshest value for any (settlement_date, settlement_period) that
-    appears in both — Elexon can revise recent settlement prices after
-    initial publication, so a re-fetch should supersede what's cached."""
+    appears in both — a re-fetch should supersede what's cached (Elexon and
+    ERCOT can both revise recently-settled prices after initial publication)."""
     if cache_path.exists():
         cached = pd.read_parquet(cache_path)
         combined = pd.concat([cached, new_data], ignore_index=True)
     else:
         combined = new_data
     combined = combined.drop_duplicates(subset=["settlement_date", "settlement_period"], keep="last")
-    return validate(combined)
+    return validate(combined, tz=tz)
 
 
 def run_pipeline(
@@ -214,11 +222,18 @@ def run_pipeline(
     cache_path: Path,
     max_missing_fraction_per_day: float = 0.0,
     max_consecutive_missing: int = 0,
+    tz: ZoneInfo = LONDON,
+    period_minutes: int = 30,
 ) -> tuple[pd.DataFrame, DataQualityReport]:
     """
     Fetch [start_date, end_date] one day at a time, merge whatever real data
     comes back into the parquet cache at cache_path, then raise
     GapThresholdExceededError if gaps exceed the configured thresholds.
+
+    tz/period_minutes must match the market fetch_one_day() actually
+    returns data for (default Europe/London, 30 — GB); every call site
+    must stay internally consistent, since schema.validate() rejects a
+    cache mixing more than one of either (see schema.py's multi-market note).
 
     Caching happens *before* the threshold check on purpose: the point of a
     per-day threshold (rather than a whole-range one) is that one bad day
@@ -227,10 +242,10 @@ def run_pipeline(
     bad day can't be silently missed by the caller.
     """
     fetched, failed_dates = _fetch_range(fetch_one_day, start_date, end_date)
-    report = compute_quality_report(fetched, start_date, end_date, source, failed_dates)
+    report = compute_quality_report(fetched, start_date, end_date, source, failed_dates, tz=tz, period_minutes=period_minutes)
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    combined = _merge_with_cache(fetched, cache_path)
+    combined = _merge_with_cache(fetched, cache_path, tz=tz)
     combined.to_parquet(cache_path, index=False)
 
     _check_thresholds(report, max_missing_fraction_per_day, max_consecutive_missing)
@@ -277,4 +292,56 @@ def run_day_ahead_pipeline(
         cache_path=cache_path,
         max_missing_fraction_per_day=max_missing_fraction_per_day,
         max_consecutive_missing=max_consecutive_missing,
+    )
+
+
+def run_ercot_dam_pipeline(
+    start_date: date,
+    end_date: date,
+    token: ErcotToken,
+    hub: str = HUB,
+    cache_path: Path = Path("data/ercot_dam_west.parquet"),
+    max_missing_fraction_per_day: float = 0.0,
+    max_consecutive_missing: int = 0,
+    session: requests.Session = requests,
+) -> tuple[pd.DataFrame, DataQualityReport]:
+    """run_pipeline() wired to fetch_dam_prices() — hourly, America/Chicago.
+    `token` must be refreshed (via sources_ercot.get_token()) by the caller
+    if it expires partway through a long fetch — this function does not
+    refresh it automatically."""
+    return run_pipeline(
+        fetch_one_day=lambda d: fetch_dam_prices(d, token=token, hub=hub, session=session),
+        start_date=start_date,
+        end_date=end_date,
+        source=SOURCE_DAM,
+        cache_path=cache_path,
+        max_missing_fraction_per_day=max_missing_fraction_per_day,
+        max_consecutive_missing=max_consecutive_missing,
+        tz=CHICAGO,
+        period_minutes=60,
+    )
+
+
+def run_ercot_rtm_pipeline(
+    start_date: date,
+    end_date: date,
+    token: ErcotToken,
+    hub: str = HUB,
+    cache_path: Path = Path("data/ercot_rtm_west.parquet"),
+    max_missing_fraction_per_day: float = 0.0,
+    max_consecutive_missing: int = 0,
+    session: requests.Session = requests,
+) -> tuple[pd.DataFrame, DataQualityReport]:
+    """run_pipeline() wired to fetch_rtm_prices() — 15-minute, America/Chicago.
+    Same token-refresh caveat as run_ercot_dam_pipeline()."""
+    return run_pipeline(
+        fetch_one_day=lambda d: fetch_rtm_prices(d, token=token, hub=hub, session=session),
+        start_date=start_date,
+        end_date=end_date,
+        source=SOURCE_RTM,
+        cache_path=cache_path,
+        max_missing_fraction_per_day=max_missing_fraction_per_day,
+        max_consecutive_missing=max_consecutive_missing,
+        tz=CHICAGO,
+        period_minutes=15,
     )

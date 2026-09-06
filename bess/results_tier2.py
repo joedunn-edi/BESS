@@ -116,7 +116,7 @@ def run_tier2_comparison(
     # isn't actually an upper bound on MPC. Found empirically (a synthetic
     # test genuinely produced MPC > that "ceiling"), not assumed — ADR-017.
     ceiling_schedule = solve_day(
-        test_price_history["price_gbp_per_kwh"].to_numpy(), battery, cyclic=False, initial_soc_kwh=initial_soc_kwh
+        test_price_history["price_per_kwh"].to_numpy(), battery, cyclic=False, initial_soc_kwh=initial_soc_kwh
     )
     tier1_total = ceiling_schedule.objective_value
 

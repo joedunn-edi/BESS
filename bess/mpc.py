@@ -85,7 +85,7 @@ def run_mpc(
     cashflow = 0.0
 
     horizons = list(range(1, horizon + 1))
-    real_prices = features_df["price_gbp_per_kwh"].to_numpy()
+    real_prices = features_df["price_per_kwh"].to_numpy()
 
     for t in range(T):
         forecast_prices = forecaster.predict(features_df.iloc[[t]], horizons=horizons).iloc[0].to_numpy()
