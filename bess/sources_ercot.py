@@ -3,36 +3,50 @@ sources_ercot.py — fetchers for ERCOT day-ahead (NP4-190-CD, hourly) and
 real-time (NP6-905-CD, 15-minute) settlement point prices, for the West
 trading hub (HB_WEST).
 
-Field names and endpoint behaviour below were cross-checked against the
-`gridstatus` open-source library (github.com/gridstatus/gridstatus), which
-already parses these same two endpoints in production. Confirmed this
-way: the base URL, both endpoint paths, and the query parameter names
-(deliveryDateFrom/deliveryDateTo — there is no settlement-point query
-filter; you fetch every settlement point for the date and filter locally,
-same pattern as sources_elexon.py's day-ahead fetcher). The token
-*request format* was NOT correctly inferred this way, and was only fixed
-after a live 400 Bad Request against a real account (2026-09-07) and
-ERCOT's own official example code: credentials go as URL query
-parameters, not a POST body, and the Bearer token is `access_token`, not
-`id_token` — see get_token()'s docstring. Still genuinely unverified: the
-*exact casing* of the JSON field names in the DAM/RTM response bodies
-themselves (gridstatus's rename map handles several historical casing
-variants across both its CSV-report and JSON-API code paths, so which one
-these specific endpoints use isn't 100% pinned down without a live
-response) — marked VERIFY below.
+Confirmed against live responses from a real account (2026-09-07):
 
-The one load-bearing, non-obvious fact this research surfaced: ERCOT
-reports hours in "Hour Ending" form (the label marks the END of the hour,
-not the start) and publishes an explicit DSTFlag ("Y"/"N") to disambiguate
-the repeated hour on the US autumn clock-change day — GB's Elexon data
-never needed anything like this, because settlement_period there is
-already a real elapsed-time position, not a wall-clock label that can
-repeat. Handled here by sorting each day's records into true chronological
-order (DSTFlag breaks the tie on the repeated hour) and assigning
-settlement_period by *position* in that sorted order — the same
-"position-in-sequence, not label arithmetic" approach schema.full_grid()
-already uses — rather than trying to compute an elapsed-hours offset
-directly from the hourEnding label, which would get the repeated hour
+    * Both endpoints paginate (1000 records/page) and return *every*
+      settlement point in ERCOT (over a thousand resource nodes, load
+      zones and hubs) unless filtered. `settlementPoint` is a genuine
+      server-side query filter (confirmed: adding it dropped a
+      53,664-record/54-page DAM response to a single page) — so we filter
+      by hub server-side, never paginate, and never filter client-side.
+    * `deliveryDateFrom`/`deliveryDateTo` are both *inclusive* (confirmed:
+      a `08-24`→`08-25` range returned both days in full — 192 RTM records
+      for one hub = 2 days × 96 intervals). A single day's fetch therefore
+      sets both to the same date, and needs no post-fetch date filter.
+    * The response body is `{"fields": [...], "data": [[...], ...]}` —
+      each row is a *positional* array, not an object; field names/order
+      come from the separate `fields` list. Parsed here by zipping the
+      two rather than assuming fixed dict keys, since nothing guarantees
+      the position order is stable across ERCOT report versions.
+    * DAM's hour field (`hourEnding`) is a string like `"01:00"`, not a
+      bare int — parsed via `int(x.split(":")[0])`.
+    * RTM has no `hourEnding` at all: it splits into separate integer
+      `deliveryHour` and `deliveryInterval` fields instead.
+    * `DSTFlag` is a real JSON boolean (`true`/`false`), not the `"Y"`/`"N"`
+      strings `gridstatus`'s CSV-report code path uses — this one would
+      have been a silent bug, not a crash: `dst_flag == "Y"` is simply
+      always False against a real bool, so the repeated-hour tie-break
+      would never have fired.
+
+The token *request format* was separately fixed after a live 400 Bad
+Request (also 2026-09-07): credentials go as URL query parameters, not a
+POST body, and the Bearer token is `access_token`, not `id_token` — see
+get_token()'s docstring.
+
+The one load-bearing, non-obvious fact this surfaced: ERCOT reports hours
+in "Hour Ending" form (the label marks the END of the hour, not the
+start) and publishes DSTFlag to disambiguate the repeated hour on the US
+autumn clock-change day — GB's Elexon data never needed anything like
+this, because settlement_period there is already a real elapsed-time
+position, not a wall-clock label that can repeat. Handled here by
+normalising each record to an (hour, interval, is_dst_repeat) tuple,
+sorting each day's records into true chronological order on that tuple,
+and assigning settlement_period by *position* in that sorted order — the
+same "position-in-sequence, not label arithmetic" approach
+schema.full_grid() already uses — rather than computing an elapsed-hours
+offset directly from the hour label, which would get the repeated hour
 silently wrong.
 
 Responsible for:
@@ -191,28 +205,30 @@ def _raise_if_all_zero(prices: pd.DataFrame, settlement_date: date, source: str)
         raise AllZeroPriceSeriesError(f"{source}: all-zero price series for {settlement_date}")
 
 
-def _dst_sort_key(record: dict) -> tuple:
-    """
-    Order records into true chronological order for one day. hourEnding
-    marks the END of each hour (VERIFY exact field casing) and repeats
-    once, at the same label, during the US autumn clock-change day —
-    DSTFlag ("Y" during the repeated/second pass, "N" otherwise, per
-    ERCOT's own convention — VERIFY this against a real response, some
-    ERCOT datasets use a bool instead of "Y"/"N") breaks that tie so the
-    first real occurrence sorts before the repeated one.
-    """
-    hour_ending = int(record["hourEnding"])  # VERIFY field name/format — may be "01:00" style, not a bare int
-    interval = int(record.get("deliveryInterval", 1))  # VERIFY — RTM only, 1-4 within the hour
-    dst_flag = record.get("DSTFlag", "N")  # VERIFY field name; "Y" = repeated hour, sorts second
-    return (hour_ending, interval, dst_flag == "Y")
+def _rows_as_dicts(payload: dict) -> list[dict]:
+    """ERCOT returns {"fields": [{"name": ...}, ...], "data": [[...], ...]}
+    — each data row is positional, matching `fields` order. Zipped here
+    rather than assumed fixed, since nothing guarantees that order is
+    stable across report versions."""
+    field_names = [f["name"] for f in payload["fields"]]
+    return [dict(zip(field_names, row)) for row in payload["data"]]
 
 
-def _hub_filter(records: list[dict], hub: str) -> list[dict]:
-    """ERCOT's SPP endpoints return every settlement point for the requested
-    date range — there is no server-side settlement-point filter, so we
-    filter client-side, same pattern as sources_elexon.py's day-ahead
-    fetcher filtering on settlementDate."""
-    return [r for r in records if r["settlementPoint"] == hub]  # VERIFY field name/casing
+def _dam_sort_key(record: dict) -> tuple:
+    """Order one day's DAM records into true chronological order.
+    hourEnding is Hour-Ending, marking the END of the hour, as a string
+    like "01:00" — repeats once, at the same label, on the US autumn
+    clock-change day. DSTFlag (a real bool) breaks that tie so the first
+    real occurrence sorts before the repeated one."""
+    hour_ending = int(record["hourEnding"].split(":")[0])
+    return (hour_ending, bool(record.get("DSTFlag", False)))
+
+
+def _rtm_sort_key(record: dict) -> tuple:
+    """Same ordering as _dam_sort_key, but RTM has no hourEnding field —
+    it splits into separate deliveryHour and deliveryInterval (1-4,
+    within the hour) integer fields instead."""
+    return (int(record["deliveryHour"]), int(record["deliveryInterval"]), bool(record.get("DSTFlag", False)))
 
 
 def fetch_dam_prices(
@@ -220,8 +236,7 @@ def fetch_dam_prices(
 ) -> pd.DataFrame:
     """
     Fetch one day of ERCOT Day-Ahead Market settlement point prices for
-    `hub` (hourly, USD). See the module docstring for what's confirmed vs
-    still VERIFY-flagged.
+    `hub` (hourly, USD).
     """
     start_utc, _ = settlement_day_utc_bounds(settlement_date, tz=CHICAGO)
     response = session.get(
@@ -229,17 +244,16 @@ def fetch_dam_prices(
         headers=_auth_headers(token),
         params={
             "deliveryDateFrom": settlement_date.isoformat(),
-            "deliveryDateTo": (settlement_date + timedelta(days=1)).isoformat(),
+            "deliveryDateTo": settlement_date.isoformat(),
+            "settlementPoint": hub,
         },
         timeout=_TIMEOUT_S,
     )
     response.raise_for_status()
-    all_records = response.json().get("data", [])  # VERIFY top-level response shape (may be paginated)
-    records = _hub_filter(all_records, hub)
-    records = [r for r in records if r["deliveryDate"] == settlement_date.isoformat()]  # VERIFY field name
+    records = _rows_as_dicts(response.json())
     _raise_if_empty(records, settlement_date, SOURCE_DAM)
 
-    records.sort(key=_dst_sort_key)
+    records.sort(key=_dam_sort_key)
     n = len(records)
     prices = pd.DataFrame(
         {
@@ -247,7 +261,7 @@ def fetch_dam_prices(
             "settlement_date": pd.Series([pd.Timestamp(settlement_date)] * n, dtype="datetime64[ns]"),
             "settlement_period": np.arange(1, n + 1, dtype="int64"),
             "period_minutes": np.full(n, 60, dtype="int64"),
-            "price_per_kwh": np.array([r["settlementPointPrice"] for r in records], dtype="float64") / 1000,  # VERIFY
+            "price_per_kwh": np.array([r["settlementPointPrice"] for r in records], dtype="float64") / 1000,
             "currency": "USD",
             "source": SOURCE_DAM,
         }
@@ -262,9 +276,9 @@ def fetch_rtm_prices(
 ) -> pd.DataFrame:
     """
     Fetch one day of ERCOT Real-Time Market settlement point prices for
-    `hub` (15-minute, USD). Same VERIFY caveats as fetch_dam_prices(), plus
-    the DST tie-break described in _dst_sort_key() matters here too — a
-    15-minute grid has 4x as many periods where the ordering must be right.
+    `hub` (15-minute, USD). The DST tie-break described in _rtm_sort_key()
+    matters more here than for DAM — a 15-minute grid has 4x as many
+    periods where the ordering must be right.
     """
     start_utc, _ = settlement_day_utc_bounds(settlement_date, tz=CHICAGO)
     response = session.get(
@@ -272,17 +286,16 @@ def fetch_rtm_prices(
         headers=_auth_headers(token),
         params={
             "deliveryDateFrom": settlement_date.isoformat(),
-            "deliveryDateTo": (settlement_date + timedelta(days=1)).isoformat(),
+            "deliveryDateTo": settlement_date.isoformat(),
+            "settlementPoint": hub,
         },
         timeout=_TIMEOUT_S,
     )
     response.raise_for_status()
-    all_records = response.json().get("data", [])
-    records = _hub_filter(all_records, hub)
-    records = [r for r in records if r["deliveryDate"] == settlement_date.isoformat()]
+    records = _rows_as_dicts(response.json())
     _raise_if_empty(records, settlement_date, SOURCE_RTM)
 
-    records.sort(key=_dst_sort_key)
+    records.sort(key=_rtm_sort_key)
     n = len(records)
     prices = pd.DataFrame(
         {
@@ -290,7 +303,7 @@ def fetch_rtm_prices(
             "settlement_date": pd.Series([pd.Timestamp(settlement_date)] * n, dtype="datetime64[ns]"),
             "settlement_period": np.arange(1, n + 1, dtype="int64"),
             "period_minutes": np.full(n, 15, dtype="int64"),
-            "price_per_kwh": np.array([r["settlementPointPrice"] for r in records], dtype="float64") / 1000,  # VERIFY
+            "price_per_kwh": np.array([r["settlementPointPrice"] for r in records], dtype="float64") / 1000,
             "currency": "USD",
             "source": SOURCE_RTM,
         }

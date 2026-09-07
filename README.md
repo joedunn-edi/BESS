@@ -230,7 +230,7 @@ brew install libomp
 **Multi-market extension — ERCOT (Texas), West Hub:**
 
 - [x] Contracts + fetchers (`schema.py` generalised, `sources_ercot.py`, `pipeline.py` wrappers) — see [ADR-018](DECISIONS.md#adr-018-schemapy-multi-market-generalisation-and-choosing-hb_west-over-a-system-wide-average)
+- [x] `sources_ercot.py` field names confirmed against live DAM/RTM responses from a real account (2026-09-07) — no `VERIFY` tags remain; see ADR-018's 2026-09-07 update
 - [ ] Point Tier 1/Tier 2 at ERCOT data — not started
-- ⚠️ `sources_ercot.py`'s exact field-name casing is unverified against a live response (no registered ERCOT account) — endpoints, auth flow, and query parameters are cross-checked against the `gridstatus` open-source library and trusted; field names are marked `VERIFY` in the module and need confirming against a real API call before production use
 
 **Tier 2 is now feature-complete: features → forecaster → MPC → backtest & sanity check, all built and verified against real data.**

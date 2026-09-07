@@ -226,6 +226,27 @@ def test_rerun_with_revised_prices_overwrites_cached_values(tmp_path):
 # --- ERCOT wrappers (fake session, since we have no registered account) -----------
 
 
+DAM_FIELDS = ["deliveryDate", "hourEnding", "settlementPoint", "settlementPointPrice", "DSTFlag"]
+RTM_FIELDS = [
+    "deliveryDate",
+    "deliveryHour",
+    "deliveryInterval",
+    "settlementPoint",
+    "settlementPointType",
+    "settlementPointPrice",
+    "DSTFlag",
+]
+
+
+def _ercot_payload(records: list[dict], field_order: list[str]) -> dict:
+    """ERCOT's real response envelope: positional rows, field names/order
+    given separately — confirmed live 2026-09-07, see sources_ercot.py."""
+    return {
+        "fields": [{"name": f} for f in field_order],
+        "data": [[r[f] for f in field_order] for r in records],
+    }
+
+
 class _FakeErcotResponse:
     def __init__(self, payload):
         self._payload = payload
@@ -240,21 +261,34 @@ class _FakeErcotResponse:
 class _FakeErcotSession:
     """Returns one full day's worth of records regardless of request args."""
 
-    def __init__(self, records: list[dict]):
-        self._records = records
+    def __init__(self, payload: dict):
+        self._payload = payload
 
     def get(self, *args, **kwargs):
-        return _FakeErcotResponse({"data": self._records})
+        return _FakeErcotResponse(self._payload)
+
+
+class _FakeErcotSessionByDate:
+    """Returns a different payload depending on the requested
+    deliveryDateFrom — needed to exercise a gappy day alongside a good one
+    over a multi-day run_ercot_dam_pipeline/run_ercot_rtm_pipeline range."""
+
+    def __init__(self, payload_by_date: dict[str, dict]):
+        self._payload_by_date = payload_by_date
+
+    def get(self, *args, **kwargs):
+        requested_date = kwargs["params"]["deliveryDateFrom"]
+        return _FakeErcotResponse(self._payload_by_date[requested_date])
 
 
 def _dam_day_records(delivery_date: str, price: float = 0.10) -> list[dict]:
     return [
         {
             "deliveryDate": delivery_date,
-            "hourEnding": h,
+            "hourEnding": f"{h:02d}:00",
             "settlementPoint": "HB_WEST",
             "settlementPointPrice": price,
-            "DSTFlag": "N",
+            "DSTFlag": False,
         }
         for h in range(1, 25)
     ]
@@ -263,7 +297,7 @@ def _dam_day_records(delivery_date: str, price: float = 0.10) -> list[dict]:
 def test_run_ercot_dam_pipeline_caches_hourly_chicago_data(tmp_path):
     d = date(2026, 7, 15)
     token = ErcotToken(access_token="fake", subscription_key="fake")
-    session = _FakeErcotSession(_dam_day_records(d.isoformat()))
+    session = _FakeErcotSession(_ercot_payload(_dam_day_records(d.isoformat()), DAM_FIELDS))
 
     combined, report = run_ercot_dam_pipeline(
         d, d, token=token, cache_path=tmp_path / "ercot_dam.parquet", session=session
@@ -275,22 +309,43 @@ def test_run_ercot_dam_pipeline_caches_hourly_chicago_data(tmp_path):
     assert report.n_missing_periods == 0
 
 
+def test_run_ercot_dam_pipeline_reports_a_gappy_day_alongside_a_good_one(tmp_path):
+    good_day, gappy_day = date(2026, 7, 15), date(2026, 7, 16)
+    token = ErcotToken(access_token="fake", subscription_key="fake")
+    gappy_records = _dam_day_records(gappy_day.isoformat())[:20]  # 4 hours missing
+    session = _FakeErcotSessionByDate(
+        {
+            good_day.isoformat(): _ercot_payload(_dam_day_records(good_day.isoformat()), DAM_FIELDS),
+            gappy_day.isoformat(): _ercot_payload(gappy_records, DAM_FIELDS),
+        }
+    )
+
+    with pytest.raises(GapThresholdExceededError, match="missing-fraction threshold"):
+        run_ercot_dam_pipeline(good_day, gappy_day, token=token, cache_path=tmp_path / "ercot_dam.parquet", session=session)
+
+    # the good day must still have been cached despite the raise (ADR-008)
+    cached = pd.read_parquet(tmp_path / "ercot_dam.parquet")
+    assert len(cached[cached["settlement_date"] == pd.Timestamp(good_day)]) == 24
+    assert len(cached[cached["settlement_date"] == pd.Timestamp(gappy_day)]) == 20
+
+
 def test_run_ercot_rtm_pipeline_caches_15_minute_chicago_data(tmp_path):
     d = date(2026, 7, 15)
     token = ErcotToken(access_token="fake", subscription_key="fake")
     records = [
         {
             "deliveryDate": d.isoformat(),
-            "hourEnding": h,
+            "deliveryHour": h,
             "deliveryInterval": i,
             "settlementPoint": "HB_WEST",
+            "settlementPointType": "HU",
             "settlementPointPrice": 0.10,
-            "DSTFlag": "N",
+            "DSTFlag": False,
         }
         for h in range(1, 25)
         for i in range(1, 5)
     ]
-    session = _FakeErcotSession(records)
+    session = _FakeErcotSession(_ercot_payload(records, RTM_FIELDS))
 
     combined, report = run_ercot_rtm_pipeline(
         d, d, token=token, cache_path=tmp_path / "ercot_rtm.parquet", session=session

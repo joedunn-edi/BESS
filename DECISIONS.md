@@ -1076,3 +1076,41 @@ Hour-Ending/DSTFlag behaviour in ADR-018's part 4) — reinforcing the same
 lesson this project has applied to itself from the start: verify against
 the real thing before trusting a description of it, however official the
 source.
+
+**Update (2026-09-07) — DAM/RTM field names confirmed live; the
+`gridstatus` cross-check on filtering was wrong.** A real account finally
+got past the earlier "socket hang up" issue and returned live DAM and RTM
+responses, resolving every remaining `VERIFY` tag:
+
+* `settlementPoint` **is** a working server-side query filter — confirmed
+  by adding `settlementPoint=HB_WEST`, which dropped a 53,664-record,
+  54-page unfiltered DAM response down to a single page. The
+  `gridstatus`-based assumption in this ADR's "Consequences" section above
+  (no server-side filter, fetch-everything-then-filter-client-side) was
+  wrong; without this, `sources_ercot.py` would have paginated through
+  every resource node, load zone and hub in Texas just to find one hub's
+  prices. Fixed by filtering server-side and deleting the client-side
+  `_hub_filter()` entirely — trusting the confirmed API behaviour rather
+  than keeping a redundant client-side check for a case the server no
+  longer allows through.
+* `deliveryDateFrom`/`deliveryDateTo` are both *inclusive* (a
+  `08-24`→`08-25` range returned both days in full). A single day's fetch
+  now sets both to the same date — no post-fetch date filter needed.
+* The response body is `{"fields": [...], "data": [[...], ...]}` —
+  positional rows, not objects; field names/order come from the separate
+  `fields` list. Parsed by zipping the two, since nothing guarantees that
+  position order is stable across ERCOT report versions.
+* DAM's `hourEnding` is a string like `"01:00"`, not a bare int.
+* RTM has no `hourEnding` field at all — it splits into separate integer
+  `deliveryHour` and `deliveryInterval` fields.
+* `DSTFlag` is a real JSON boolean (`true`/`false`), not the `"Y"`/`"N"`
+  strings `gridstatus`'s CSV-report code path uses. This was the most
+  dangerous of the wrong assumptions: `dst_flag == "Y"` against a real
+  bool is simply always `False`, so the repeated-hour DST tie-break would
+  never have fired — not a crash, a silent misordering of the one day a
+  year it matters most.
+
+All fixed in `sources_ercot.py`, with `test_sources_ercot.py` and
+`test_pipeline.py`'s ERCOT fixtures rebuilt to match the real response
+shape. Full suite (129 tests) still green. No `VERIFY` tags remain in
+`sources_ercot.py`.
