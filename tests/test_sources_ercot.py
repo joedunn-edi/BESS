@@ -14,7 +14,9 @@ still needs a live call once a real account exists.
 from datetime import date
 
 import pytest
+import requests
 
+import bess.sources_ercot as sources_ercot
 from bess.sources_ercot import (
     HUB,
     SOURCE_DAM,
@@ -25,6 +27,7 @@ from bess.sources_ercot import (
     _hub_filter,
     fetch_dam_prices,
     fetch_rtm_prices,
+    get_token,
 )
 
 
@@ -170,3 +173,68 @@ def test_token_not_expired_when_fresh():
 def test_token_expired_when_old():
     old_token = ErcotToken(access_token="fake", subscription_key="fake", obtained_at=0.0)
     assert old_token.expired
+
+
+# --- get_token() — scope encoding and credential-safe error handling --------------
+
+
+class _FakePostResponse:
+    def __init__(self, status_code=200, payload=None):
+        self.status_code = status_code
+        self._payload = payload or {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            err = requests.exceptions.HTTPError(f"{self.status_code} Client Error: Bad Request for url: FAKE-URL")
+            err.response = self
+            raise err
+
+    def json(self):
+        return self._payload
+
+
+def test_get_token_appends_scope_unescaped_not_via_params(monkeypatch):
+    captured = {}
+
+    def fake_post(url, params=None, timeout=None):
+        captured["url"] = url
+        captured["params"] = params
+        return _FakePostResponse(200, {"access_token": "tok"})
+
+    monkeypatch.setattr(sources_ercot.requests, "post", fake_post)
+
+    get_token(username="user@example.com", password="pw", subscription_key="sub")
+
+    # the literal '+' separators in SCOPE must survive unescaped in the URL
+    # itself — they must NOT be passed through params (which would get them
+    # percent-encoded to %2B, silently changing their meaning for ERCOT's server)
+    assert f"scope={sources_ercot.SCOPE}" in captured["url"]
+    assert "scope" not in captured["params"]
+    assert captured["params"]["username"] == "user@example.com"
+
+
+def test_get_token_uses_access_token_field(monkeypatch):
+    def fake_post(url, params=None, timeout=None):
+        return _FakePostResponse(200, {"access_token": "the-real-token", "id_token": "not-this-one"})
+
+    monkeypatch.setattr(sources_ercot.requests, "post", fake_post)
+
+    token = get_token(username="u", password="p", subscription_key="s")
+
+    assert token.access_token == "the-real-token"
+
+
+def test_get_token_failure_never_leaks_url_or_credentials(monkeypatch):
+    def fake_post(url, params=None, timeout=None):
+        return _FakePostResponse(400, {})
+
+    monkeypatch.setattr(sources_ercot.requests, "post", fake_post)
+
+    real_password = "super-secret-password-do-not-leak"
+    with pytest.raises(requests.exceptions.HTTPError) as exc_info:
+        get_token(username="user@example.com", password=real_password, subscription_key="sub")
+
+    message = str(exc_info.value)
+    assert real_password not in message
+    assert "FAKE-URL" not in message  # the underlying HTTPError's own message must not survive
+    assert "400" in message  # the status code itself is fine to keep — it's not sensitive

@@ -113,32 +113,63 @@ def get_token(username: str, password: str, subscription_key: str) -> ErcotToken
     point price products — this project's own tooling has no way to
     create that account for you; it needs a person to register.
 
-    Confirmed against a real account (2026-09-07, live 400 Bad Request
-    diagnosed and fixed): ERCOT's B2C token endpoint expects these
-    credentials as URL query parameters, not a POST body — passing them as
-    `data=` (standard OAuth2 ROPC form-encoding, and what the endpoint's
-    own documentation implied) gets a 400. ERCOT's own official example
-    code confirms query parameters, built via raw string formatting; using
-    `params=` here instead gets the same result while letting `requests`
-    URL-encode the password properly (their example doesn't, and would
-    break on a password containing `&`, `%`, `+`, or similar). Their
-    example also extracts `access_token` from the response (not
-    `id_token`, despite `response_type=id_token` in the request) and uses
-    that as the Bearer token — matched here.
+    Confirmed against a real account (2026-09-07, two live 400 Bad Request
+    responses diagnosed and fixed in turn):
+
+    1. ERCOT's B2C token endpoint expects these credentials as URL query
+       parameters, not a POST body — passing them as `data=` (standard
+       OAuth2 ROPC form-encoding, and what the endpoint's own written
+       documentation implied) gets a 400. ERCOT's own official example
+       code confirms query parameters, built via raw string formatting.
+       Their example also extracts `access_token` from the response (not
+       `id_token`, despite `response_type=id_token` in the request) and
+       uses that as the Bearer token — matched here.
+
+    2. SCOPE contains literal `+` characters used, per the old
+       application/x-www-form-urlencoded convention, as separators between
+       three distinct scope values (not literal plus signs) — ERCOT's
+       server expects them completely unescaped. Passing SCOPE through
+       `params=` like the other fields makes `requests` "correctly"
+       percent-encode `+` to `%2B`, which silently changes its meaning
+       into one scope value containing literal plus signs, and the server
+       rejects it. Fixed by appending SCOPE to the URL unescaped, exactly
+       as ERCOT's own example does, and passing only the genuinely
+       variable fields (username, password, etc.) through `params=` so
+       *those* still get properly encoded — a password containing `&`,
+       `%`, or `+` would otherwise corrupt the query string the same way
+       ERCOT's own raw-string example is vulnerable to.
+
+    Any failure here is re-raised with the credential-bearing request URL
+    stripped out of the error message — `requests.HTTPError`'s default
+    message includes the full failed URL, which for this API means the
+    password in plaintext. That's genuinely dangerous: it can end up in
+    logs, terminal scrollback, or get pasted into a bug report or chat
+    without anyone noticing it's in there (this happened once already,
+    while developing this fetcher against a real account — no lasting
+    exposure, since it never left a local, uncommitted file, but it
+    should never be possible to repeat by accident).
     """
-    response = requests.post(
-        TOKEN_URL,
-        params={
-            "username": username,
-            "password": password,
-            "grant_type": "password",
-            "scope": SCOPE,
-            "client_id": CLIENT_ID,
-            "response_type": "id_token",
-        },
-        timeout=_TIMEOUT_S,
-    )
-    response.raise_for_status()
+    url_with_scope = f"{TOKEN_URL}?scope={SCOPE}"
+    try:
+        response = requests.post(
+            url_with_scope,
+            params={
+                "username": username,
+                "password": password,
+                "grant_type": "password",
+                "client_id": CLIENT_ID,
+                "response_type": "id_token",
+            },
+            timeout=_TIMEOUT_S,
+        )
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        raise requests.exceptions.HTTPError(
+            f"ERCOT token request failed with status {status} "
+            "(URL and credentials deliberately omitted from this message — "
+            "see ERCOT's API Explorer for request/response details if needed)"
+        ) from None
     payload = response.json()
     return ErcotToken(access_token=payload["access_token"], subscription_key=subscription_key)
 
