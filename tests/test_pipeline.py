@@ -262,7 +262,7 @@ def _dam_day_records(delivery_date: str, price: float = 0.10) -> list[dict]:
 
 def test_run_ercot_dam_pipeline_caches_hourly_chicago_data(tmp_path):
     d = date(2026, 7, 15)
-    token = ErcotToken(id_token="fake", subscription_key="fake")
+    token = ErcotToken(access_token="fake", subscription_key="fake")
     session = _FakeErcotSession(_dam_day_records(d.isoformat()))
 
     combined, report = run_ercot_dam_pipeline(
@@ -277,7 +277,7 @@ def test_run_ercot_dam_pipeline_caches_hourly_chicago_data(tmp_path):
 
 def test_run_ercot_rtm_pipeline_caches_15_minute_chicago_data(tmp_path):
     d = date(2026, 7, 15)
-    token = ErcotToken(id_token="fake", subscription_key="fake")
+    token = ErcotToken(access_token="fake", subscription_key="fake")
     records = [
         {
             "deliveryDate": d.isoformat(),

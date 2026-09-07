@@ -5,18 +5,21 @@ trading hub (HB_WEST).
 
 Field names and endpoint behaviour below were cross-checked against the
 `gridstatus` open-source library (github.com/gridstatus/gridstatus), which
-already parses these same two endpoints in production — not against a
-live authenticated call of our own (ERCOT requires a real registered
-account; see get_token()'s docstring). Confirmed this way: the base URL,
-both endpoint paths, the token URL/flow, and the query parameter names
+already parses these same two endpoints in production. Confirmed this
+way: the base URL, both endpoint paths, and the query parameter names
 (deliveryDateFrom/deliveryDateTo — there is no settlement-point query
 filter; you fetch every settlement point for the date and filter locally,
-same pattern as sources_elexon.py's day-ahead fetcher). Still genuinely
-unverified: the *exact casing* of the JSON field names in ERCOT's REST
-API responses specifically (gridstatus's rename map handles several
-historical casing variants across both its CSV-report and JSON-API code
-paths, so which one this specific endpoint uses isn't 100% pinned down
-without a live response) — marked VERIFY below.
+same pattern as sources_elexon.py's day-ahead fetcher). The token
+*request format* was NOT correctly inferred this way, and was only fixed
+after a live 400 Bad Request against a real account (2026-09-07) and
+ERCOT's own official example code: credentials go as URL query
+parameters, not a POST body, and the Bearer token is `access_token`, not
+`id_token` — see get_token()'s docstring. Still genuinely unverified: the
+*exact casing* of the JSON field names in the DAM/RTM response bodies
+themselves (gridstatus's rename map handles several historical casing
+variants across both its CSV-report and JSON-API code paths, so which one
+these specific endpoints use isn't 100% pinned down without a live
+response) — marked VERIFY below.
 
 The one load-bearing, non-obvious fact this research surfaced: ERCOT
 reports hours in "Hour Ending" form (the label marks the END of the hour,
@@ -79,7 +82,7 @@ class AllZeroPriceSeriesError(ValueError):
 
 @dataclass
 class ErcotToken:
-    id_token: str
+    access_token: str
     subscription_key: str
     obtained_at: float | None = None
 
@@ -99,18 +102,33 @@ class ErcotToken:
 
 def get_token(username: str, password: str, subscription_key: str) -> ErcotToken:
     """
-    Exchange ERCOT account credentials for a short-lived ID token. Call
+    Exchange ERCOT account credentials for a short-lived access token. Call
     again whenever token.expired is True — there is no refresh-token
-    shortcut for this API.
+    shortcut used here (the response does include one, but a fresh
+    password grant is simpler than managing refresh-token state for a
+    batch fetcher that runs occasionally, not continuously).
 
     Requires a real account registered at apiexplorer.ercot.com, plus a
     subscription (for the subscription_key) to the DAM/RTM settlement
     point price products — this project's own tooling has no way to
     create that account for you; it needs a person to register.
+
+    Confirmed against a real account (2026-09-07, live 400 Bad Request
+    diagnosed and fixed): ERCOT's B2C token endpoint expects these
+    credentials as URL query parameters, not a POST body — passing them as
+    `data=` (standard OAuth2 ROPC form-encoding, and what the endpoint's
+    own documentation implied) gets a 400. ERCOT's own official example
+    code confirms query parameters, built via raw string formatting; using
+    `params=` here instead gets the same result while letting `requests`
+    URL-encode the password properly (their example doesn't, and would
+    break on a password containing `&`, `%`, `+`, or similar). Their
+    example also extracts `access_token` from the response (not
+    `id_token`, despite `response_type=id_token` in the request) and uses
+    that as the Bearer token — matched here.
     """
     response = requests.post(
         TOKEN_URL,
-        data={
+        params={
             "username": username,
             "password": password,
             "grant_type": "password",
@@ -122,12 +140,12 @@ def get_token(username: str, password: str, subscription_key: str) -> ErcotToken
     )
     response.raise_for_status()
     payload = response.json()
-    return ErcotToken(id_token=payload["id_token"], subscription_key=subscription_key)
+    return ErcotToken(access_token=payload["access_token"], subscription_key=subscription_key)
 
 
 def _auth_headers(token: ErcotToken) -> dict[str, str]:
     return {
-        "Authorization": f"Bearer {token.id_token}",
+        "Authorization": f"Bearer {token.access_token}",
         "Ocp-Apim-Subscription-Key": token.subscription_key,
     }
 

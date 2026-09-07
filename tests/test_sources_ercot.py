@@ -48,7 +48,7 @@ class _FakeSession:
 
 
 def _token() -> ErcotToken:
-    return ErcotToken(id_token="fake", subscription_key="fake")
+    return ErcotToken(access_token="fake", subscription_key="fake")
 
 
 def _dam_record(hour_ending: int, price: float, hub: str = HUB, delivery_date: str = "2026-07-15", dst_flag: str = "N"):
@@ -168,5 +168,5 @@ def test_token_not_expired_when_fresh():
 
 
 def test_token_expired_when_old():
-    old_token = ErcotToken(id_token="fake", subscription_key="fake", obtained_at=0.0)
+    old_token = ErcotToken(access_token="fake", subscription_key="fake", obtained_at=0.0)
     assert old_token.expired

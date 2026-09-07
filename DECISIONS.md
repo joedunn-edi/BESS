@@ -1053,3 +1053,26 @@ the same "validate one real day before writing the parser" discipline
 suite (125 tests) passes unchanged after the schema generalisation — the
 new parameters' defaults exactly reproduce prior GB behaviour, confirmed
 directly by running the full suite before and after, not assumed.
+
+**Update (2026-09-07) — `get_token()` corrected against a real account.**
+The first version of `get_token()` sent credentials as a POST body
+(`data=`), matching the general shape described in ERCOT's own written
+API documentation. Against a real registered account this returned `400
+Bad Request`. ERCOT's own official example code (not just their prose
+documentation) showed the actual, working shape: credentials go as URL
+query parameters, not a body — some Azure B2C custom-policy token
+endpoints are configured to read the request this way, which written
+documentation describing "POST parameters" doesn't distinguish from a
+form body. Their example also reads `access_token` from the response and
+uses that as the Bearer token, not `id_token` (both are present in the
+response; only one is the one their own working flow actually uses) —
+`ErcotToken`'s field renamed to match. Fixed to use `requests`' `params=`
+rather than copying their example's raw string formatting verbatim, since
+the latter doesn't URL-encode the password and would break on one
+containing `&`, `%`, or `+`. This is the second time in this ERCOT
+integration that *written* API documentation described something subtly
+differently from what the API actually does (the first being the
+Hour-Ending/DSTFlag behaviour in ADR-018's part 4) — reinforcing the same
+lesson this project has applied to itself from the start: verify against
+the real thing before trusting a description of it, however official the
+source.
