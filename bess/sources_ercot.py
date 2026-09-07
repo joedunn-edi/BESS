@@ -63,8 +63,10 @@ Deliberately NOT responsible for:
 from __future__ import annotations
 
 import time
+import warnings
 from dataclasses import dataclass
 from datetime import date, timedelta
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -200,6 +202,28 @@ def _raise_if_empty(records: list[dict], settlement_date: date, source: str) -> 
         raise AllZeroPriceSeriesError(f"{source}: no records returned for {settlement_date}")
 
 
+def _build_day_frames_isolating_failures(
+    records_by_date: dict[str, list[dict]], build_one_day: Callable[[list[dict], date], pd.DataFrame], source: str
+) -> list[pd.DataFrame]:
+    """Build one frame per date in records_by_date via build_one_day(),
+    warning and skipping any single date that fails (e.g. a genuine
+    upstream data anomaly like an extra, duplicate-looking record for one
+    day) rather than letting one bad day discard every other — otherwise-
+    good — day in the same multi-day request, matching pipeline.py's own
+    "cache the good, flag the bad" discipline (ADR-008) for the day-by-day
+    fetch path."""
+    frames = []
+    for delivery_date, day_records in sorted(records_by_date.items()):
+        d = date.fromisoformat(delivery_date)
+        try:
+            frames.append(build_one_day(day_records, d))
+        except (ValueError, AllZeroPriceSeriesError) as exc:
+            warnings.warn(f"{source}: {d} failed to parse, skipped: {exc}")
+    if not frames:
+        raise AllZeroPriceSeriesError(f"{source}: every day in this range failed to parse")
+    return frames
+
+
 def _raise_if_all_zero(prices: pd.DataFrame, settlement_date: date, source: str) -> None:
     if (prices["price_per_kwh"] == 0).all():
         raise AllZeroPriceSeriesError(f"{source}: all-zero price series for {settlement_date}")
@@ -292,6 +316,12 @@ def fetch_dam_prices_range(
     this function deliberately does not follow pagination itself, so a
     caller backfilling a long history should chunk their own calls (e.g.
     one call per ~30-day window) rather than risk silently missing pages.
+
+    A single day within the range that fails to parse (e.g. a genuine
+    upstream anomaly — one real day came back with 97 fifteen-minute RTM
+    records instead of 96, tripping schema.validate()'s period-count
+    check) is warned about and skipped, not allowed to discard every
+    other, otherwise-good day in the same request.
     """
     response = session.get(
         BASE_URL + DAM_PRODUCT_PATH,
@@ -318,38 +348,16 @@ def fetch_dam_prices_range(
     for r in records:
         records_by_date.setdefault(r["deliveryDate"], []).append(r)
 
-    frames = [
-        _build_dam_frame(day_records, date.fromisoformat(delivery_date))
-        for delivery_date, day_records in sorted(records_by_date.items())
-    ]
+    frames = _build_day_frames_isolating_failures(records_by_date, _build_dam_frame, SOURCE_DAM)
     return pd.concat(frames, ignore_index=True)
 
 
-def fetch_rtm_prices(
-    settlement_date: date, token: ErcotToken, hub: str = HUB, session: requests.Session = requests
-) -> pd.DataFrame:
-    """
-    Fetch one day of ERCOT Real-Time Market settlement point prices for
-    `hub` (15-minute, USD). The DST tie-break described in _rtm_sort_key()
-    matters more here than for DAM — a 15-minute grid has 4x as many
-    periods where the ordering must be right.
-    """
+def _build_rtm_frame(records: list[dict], settlement_date: date) -> pd.DataFrame:
+    """Shared by fetch_rtm_prices() and fetch_rtm_prices_range(): turn one
+    day's already-fetched, already-hub-filtered records into a canonical
+    schema frame."""
     start_utc, _ = settlement_day_utc_bounds(settlement_date, tz=CHICAGO)
-    response = session.get(
-        BASE_URL + RTM_PRODUCT_PATH,
-        headers=_auth_headers(token),
-        params={
-            "deliveryDateFrom": settlement_date.isoformat(),
-            "deliveryDateTo": settlement_date.isoformat(),
-            "settlementPoint": hub,
-        },
-        timeout=_TIMEOUT_S,
-    )
-    response.raise_for_status()
-    records = _rows_as_dicts(response.json())
-    _raise_if_empty(records, settlement_date, SOURCE_RTM)
-
-    records.sort(key=_rtm_sort_key)
+    records = sorted(records, key=_rtm_sort_key)
     n = len(records)
     prices = pd.DataFrame(
         {
@@ -365,3 +373,68 @@ def fetch_rtm_prices(
     prices = validate(prices, tz=CHICAGO)
     _raise_if_all_zero(prices, settlement_date, SOURCE_RTM)
     return prices
+
+
+def fetch_rtm_prices(
+    settlement_date: date, token: ErcotToken, hub: str = HUB, session: requests.Session = requests
+) -> pd.DataFrame:
+    """
+    Fetch one day of ERCOT Real-Time Market settlement point prices for
+    `hub` (15-minute, USD). The DST tie-break described in _rtm_sort_key()
+    matters more here than for DAM — a 15-minute grid has 4x as many
+    periods where the ordering must be right.
+    """
+    response = session.get(
+        BASE_URL + RTM_PRODUCT_PATH,
+        headers=_auth_headers(token),
+        params={
+            "deliveryDateFrom": settlement_date.isoformat(),
+            "deliveryDateTo": settlement_date.isoformat(),
+            "settlementPoint": hub,
+        },
+        timeout=_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    records = _rows_as_dicts(response.json())
+    _raise_if_empty(records, settlement_date, SOURCE_RTM)
+    return _build_rtm_frame(records, settlement_date)
+
+
+def fetch_rtm_prices_range(
+    start_date: date, end_date: date, token: ErcotToken, hub: str = HUB, session: requests.Session = requests
+) -> pd.DataFrame:
+    """
+    Fetch multiple days of ERCOT RTM prices for `hub` in a single request —
+    see fetch_dam_prices_range()'s docstring for the reasoning, identical
+    here except RTM's 15-minute grid means ERCOT's 1000-record page limit
+    is reached far sooner: ~10 days of one hub, not ~41. Raises rather than
+    silently paginating if a request comes back split across more than one
+    page, same as fetch_dam_prices_range().
+    """
+    response = session.get(
+        BASE_URL + RTM_PRODUCT_PATH,
+        headers=_auth_headers(token),
+        params={
+            "deliveryDateFrom": start_date.isoformat(),
+            "deliveryDateTo": end_date.isoformat(),
+            "settlementPoint": hub,
+        },
+        timeout=_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    total_pages = payload.get("_meta", {}).get("totalPages", 1)
+    if total_pages > 1:
+        raise ValueError(
+            f"{SOURCE_RTM}: {start_date} to {end_date} came back paginated ({total_pages} pages) — "
+            "request a shorter range per call instead of relying on this function to paginate"
+        )
+    records = _rows_as_dicts(payload)
+    _raise_if_empty(records, start_date, SOURCE_RTM)
+
+    records_by_date: dict[str, list[dict]] = {}
+    for r in records:
+        records_by_date.setdefault(r["deliveryDate"], []).append(r)
+
+    frames = _build_day_frames_isolating_failures(records_by_date, _build_rtm_frame, SOURCE_RTM)
+    return pd.concat(frames, ignore_index=True)

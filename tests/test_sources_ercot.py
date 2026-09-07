@@ -26,6 +26,7 @@ from bess.sources_ercot import (
     fetch_dam_prices,
     fetch_dam_prices_range,
     fetch_rtm_prices,
+    fetch_rtm_prices_range,
     get_token,
 )
 
@@ -260,6 +261,32 @@ def test_fetch_dam_prices_range_raises_when_response_is_paginated():
         fetch_dam_prices_range(date(2026, 7, 15), date(2026, 8, 25), token=_token(), session=session)
 
 
+def test_fetch_dam_prices_range_skips_a_bad_day_but_keeps_the_good_ones():
+    # a real anomaly we actually hit: one day's records fail
+    # schema.validate()'s period-count check (an extra, duplicate-looking
+    # record) — that day must be dropped, not the whole request
+    good_day_1 = [_dam_record(h, 0.10, delivery_date="2026-07-15") for h in range(1, 25)]
+    good_day_2 = [_dam_record(h, 0.10, delivery_date="2026-07-17") for h in range(1, 25)]
+    bad_day = [_dam_record(h, 0.10, delivery_date="2026-07-16") for h in range(1, 25)]
+    bad_day.append(_dam_record(24, 0.20, delivery_date="2026-07-16", dst=True))  # extra 25th record
+
+    session = _FakeSession(_payload(good_day_1 + bad_day + good_day_2, DAM_FIELDS))
+    with pytest.warns(UserWarning, match="2026-07-16"):
+        prices = fetch_dam_prices_range(date(2026, 7, 15), date(2026, 7, 17), token=_token(), session=session)
+
+    assert sorted(prices["settlement_date"].dt.date.unique()) == [date(2026, 7, 15), date(2026, 7, 17)]
+    assert len(prices) == 48
+
+
+def test_fetch_dam_prices_range_raises_if_every_day_fails():
+    bad_day = [_dam_record(h, 0.10, delivery_date="2026-07-15") for h in range(1, 25)]
+    bad_day.append(_dam_record(24, 0.20, delivery_date="2026-07-15", dst=True))  # extra 25th record
+
+    session = _FakeSession(_payload(bad_day, DAM_FIELDS))
+    with pytest.warns(UserWarning), pytest.raises(AllZeroPriceSeriesError, match="every day"):
+        fetch_dam_prices_range(date(2026, 7, 15), date(2026, 7, 15), token=_token(), session=session)
+
+
 def test_fetch_dam_prices_raises_on_all_zero():
     records = [_dam_record(h, 0.0) for h in range(1, 25)]
     session = _FakeSession(_payload(records, DAM_FIELDS))
@@ -307,6 +334,45 @@ def test_fetch_rtm_prices_raises_on_empty_response():
     session = _FakeSession(_payload([], RTM_FIELDS))
     with pytest.raises(AllZeroPriceSeriesError, match="no records returned"):
         fetch_rtm_prices(date(2026, 7, 15), token=_token(), session=session)
+
+
+# --- fetch_rtm_prices_range (bulk backfill, one request for many days) -------------
+
+
+def test_fetch_rtm_prices_range_parses_multiple_days():
+    records = [
+        _rtm_record(h, i, 0.10 + h * 0.001, delivery_date=d)
+        for d in ("2026-07-15", "2026-07-16")
+        for h in range(1, 25)
+        for i in range(1, 5)
+    ]
+    session = _FakeSession(_payload(records, RTM_FIELDS))
+    prices = fetch_rtm_prices_range(date(2026, 7, 15), date(2026, 7, 16), token=_token(), session=session)
+
+    assert len(prices) == 192
+    for d in (date(2026, 7, 15), date(2026, 7, 16)):
+        day_rows = prices[prices["settlement_date"] == pd.Timestamp(d)]
+        assert list(day_rows["settlement_period"]) == list(range(1, 97))
+
+
+def test_fetch_rtm_prices_range_sends_the_full_range_and_settlement_point_filter():
+    records = [_rtm_record(h, i, 0.10, delivery_date=d) for d in ("2026-07-15", "2026-07-16") for h in range(1, 25) for i in range(1, 5)]
+    session = _CapturingSession(_payload(records, RTM_FIELDS))
+    fetch_rtm_prices_range(date(2026, 7, 15), date(2026, 7, 16), token=_token(), session=session)
+
+    assert session.captured_params["settlementPoint"] == HUB
+    assert session.captured_params["deliveryDateFrom"] == "2026-07-15"
+    assert session.captured_params["deliveryDateTo"] == "2026-07-16"
+
+
+def test_fetch_rtm_prices_range_raises_when_response_is_paginated():
+    records = [_rtm_record(h, i, 0.10) for h in range(1, 25) for i in range(1, 5)]
+    payload = _payload(records, RTM_FIELDS)
+    payload["_meta"] = {"totalPages": 35}
+    session = _FakeSession(payload)
+
+    with pytest.raises(ValueError, match="paginated"):
+        fetch_rtm_prices_range(date(2026, 7, 15), date(2026, 8, 25), token=_token(), session=session)
 
 
 # --- ErcotToken ------------------------------------------------------------------------
