@@ -231,29 +231,12 @@ def _rtm_sort_key(record: dict) -> tuple:
     return (int(record["deliveryHour"]), int(record["deliveryInterval"]), bool(record.get("DSTFlag", False)))
 
 
-def fetch_dam_prices(
-    settlement_date: date, token: ErcotToken, hub: str = HUB, session: requests.Session = requests
-) -> pd.DataFrame:
-    """
-    Fetch one day of ERCOT Day-Ahead Market settlement point prices for
-    `hub` (hourly, USD).
-    """
+def _build_dam_frame(records: list[dict], settlement_date: date) -> pd.DataFrame:
+    """Shared by fetch_dam_prices() and fetch_dam_prices_range(): turn one
+    day's already-fetched, already-hub-filtered records into a canonical
+    schema frame."""
     start_utc, _ = settlement_day_utc_bounds(settlement_date, tz=CHICAGO)
-    response = session.get(
-        BASE_URL + DAM_PRODUCT_PATH,
-        headers=_auth_headers(token),
-        params={
-            "deliveryDateFrom": settlement_date.isoformat(),
-            "deliveryDateTo": settlement_date.isoformat(),
-            "settlementPoint": hub,
-        },
-        timeout=_TIMEOUT_S,
-    )
-    response.raise_for_status()
-    records = _rows_as_dicts(response.json())
-    _raise_if_empty(records, settlement_date, SOURCE_DAM)
-
-    records.sort(key=_dam_sort_key)
+    records = sorted(records, key=_dam_sort_key)
     n = len(records)
     prices = pd.DataFrame(
         {
@@ -269,6 +252,77 @@ def fetch_dam_prices(
     prices = validate(prices, tz=CHICAGO)
     _raise_if_all_zero(prices, settlement_date, SOURCE_DAM)
     return prices
+
+
+def fetch_dam_prices(
+    settlement_date: date, token: ErcotToken, hub: str = HUB, session: requests.Session = requests
+) -> pd.DataFrame:
+    """
+    Fetch one day of ERCOT Day-Ahead Market settlement point prices for
+    `hub` (hourly, USD).
+    """
+    response = session.get(
+        BASE_URL + DAM_PRODUCT_PATH,
+        headers=_auth_headers(token),
+        params={
+            "deliveryDateFrom": settlement_date.isoformat(),
+            "deliveryDateTo": settlement_date.isoformat(),
+            "settlementPoint": hub,
+        },
+        timeout=_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    records = _rows_as_dicts(response.json())
+    _raise_if_empty(records, settlement_date, SOURCE_DAM)
+    return _build_dam_frame(records, settlement_date)
+
+
+def fetch_dam_prices_range(
+    start_date: date, end_date: date, token: ErcotToken, hub: str = HUB, session: requests.Session = requests
+) -> pd.DataFrame:
+    """
+    Fetch multiple days of ERCOT DAM prices for `hub` in a single request,
+    rather than one request per day — exploits the same two confirmed-live
+    facts fetch_dam_prices() does (settlementPoint filters server-side,
+    deliveryDateFrom/deliveryDateTo accept a genuine multi-day range), just
+    without collapsing the range down to one day.
+
+    Raises ValueError if the range would come back paginated (ERCOT pages
+    at 1000 records — roughly 41 days of one hub's hourly DAM prices):
+    this function deliberately does not follow pagination itself, so a
+    caller backfilling a long history should chunk their own calls (e.g.
+    one call per ~30-day window) rather than risk silently missing pages.
+    """
+    response = session.get(
+        BASE_URL + DAM_PRODUCT_PATH,
+        headers=_auth_headers(token),
+        params={
+            "deliveryDateFrom": start_date.isoformat(),
+            "deliveryDateTo": end_date.isoformat(),
+            "settlementPoint": hub,
+        },
+        timeout=_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    total_pages = payload.get("_meta", {}).get("totalPages", 1)
+    if total_pages > 1:
+        raise ValueError(
+            f"{SOURCE_DAM}: {start_date} to {end_date} came back paginated ({total_pages} pages) — "
+            "request a shorter range per call instead of relying on this function to paginate"
+        )
+    records = _rows_as_dicts(payload)
+    _raise_if_empty(records, start_date, SOURCE_DAM)
+
+    records_by_date: dict[str, list[dict]] = {}
+    for r in records:
+        records_by_date.setdefault(r["deliveryDate"], []).append(r)
+
+    frames = [
+        _build_dam_frame(day_records, date.fromisoformat(delivery_date))
+        for delivery_date, day_records in sorted(records_by_date.items())
+    ]
+    return pd.concat(frames, ignore_index=True)
 
 
 def fetch_rtm_prices(

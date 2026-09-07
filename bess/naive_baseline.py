@@ -56,10 +56,15 @@ class NaiveSchedule:
     discharge_kw: np.ndarray
 
 
-def solve_day_naive(prices: np.ndarray, battery: Battery, boundary_soc: float = 0.5) -> NaiveSchedule:
+def solve_day_naive(
+    prices: np.ndarray, battery: Battery, boundary_soc: float = 0.5, dt_hours: float = DT_HOURS
+) -> NaiveSchedule:
     """
     Build the naive charge-cheapest/discharge-priciest schedule for one day.
     See the module docstring for how N_charge/N_discharge are derived.
+
+    dt_hours (default 0.5) must match whatever period length `prices` is
+    actually sampled at.
     """
     T = len(prices)
     prices = np.asarray(prices)
@@ -73,8 +78,8 @@ def solve_day_naive(prices: np.ndarray, battery: Battery, boundary_soc: float = 
         )
 
     headroom_kwh = soc_max_kwh - boundary_soc_kwh
-    charge_full_step = battery.eta_charge * battery.power_kw * DT_HOURS
-    discharge_full_step = battery.power_kw * DT_HOURS / battery.eta_discharge
+    charge_full_step = battery.eta_charge * battery.power_kw * dt_hours
+    discharge_full_step = battery.power_kw * dt_hours / battery.eta_discharge
 
     n_charge = math.ceil(headroom_kwh / charge_full_step) if headroom_kwh > 0 else 0
     n_discharge = math.ceil(headroom_kwh / discharge_full_step) if headroom_kwh > 0 else 0
@@ -97,7 +102,7 @@ def solve_day_naive(prices: np.ndarray, battery: Battery, boundary_soc: float = 
                 charge_kw[t] = battery.power_kw
                 remaining_kwh -= charge_full_step
             else:
-                charge_kw[t] = remaining_kwh / (battery.eta_charge * DT_HOURS)
+                charge_kw[t] = remaining_kwh / (battery.eta_charge * dt_hours)
 
     if n_discharge > 0:
         priciest = np.argsort(-prices)[:n_discharge]  # descending: priciest first
@@ -107,6 +112,6 @@ def solve_day_naive(prices: np.ndarray, battery: Battery, boundary_soc: float = 
                 discharge_kw[t] = battery.power_kw
                 remaining_kwh -= discharge_full_step
             else:
-                discharge_kw[t] = remaining_kwh * battery.eta_discharge / DT_HOURS
+                discharge_kw[t] = remaining_kwh * battery.eta_discharge / dt_hours
 
     return NaiveSchedule(charge_kw=charge_kw, discharge_kw=discharge_kw)

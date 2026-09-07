@@ -63,6 +63,7 @@ def simulate(
     prices: np.ndarray,
     battery: Battery,
     initial_soc_kwh: float,
+    dt_hours: float = DT_HOURS,
 ) -> BacktestResult:
     """
     Independently recompute the SoC trajectory and cashflow for a given
@@ -71,6 +72,9 @@ def simulate(
     degradation convention as optimiser_tier1.py (discharge-only, ADR-009)
     since that's a modelling decision already made, not something this
     module re-litigates — only the arithmetic implementing it is separate.
+
+    dt_hours (default 0.5) must match whatever the schedule being checked
+    was itself solved with — see optimiser_tier1.solve_day()'s docstring.
     """
     if not (len(charge_kw) == len(discharge_kw) == len(prices)):
         raise ValueError(
@@ -86,13 +90,13 @@ def simulate(
     for t in range(T):
         soc_kwh[t + 1] = (
             soc_kwh[t]
-            + battery.eta_charge * charge_kw[t] * DT_HOURS
-            - discharge_kw[t] * DT_HOURS / battery.eta_discharge
+            + battery.eta_charge * charge_kw[t] * dt_hours
+            - discharge_kw[t] * dt_hours / battery.eta_discharge
         )
         cashflow += (
-            prices[t] * discharge_kw[t] * DT_HOURS
-            - prices[t] * charge_kw[t] * DT_HOURS
-            - battery.degradation_cost_per_kwh * discharge_kw[t] * DT_HOURS
+            prices[t] * discharge_kw[t] * dt_hours
+            - prices[t] * charge_kw[t] * dt_hours
+            - battery.degradation_cost_per_kwh * discharge_kw[t] * dt_hours
         )
 
     soc_min_kwh = battery.soc_min * battery.capacity_kwh
@@ -120,6 +124,7 @@ def assert_matches_lp(
     prices: np.ndarray,
     battery: Battery,
     tolerance: float = DEFAULT_TOLERANCE,
+    dt_hours: float = DT_HOURS,
 ) -> BacktestResult:
     """
     The correctness anchor: independently recompute `schedule`'s cashflow
@@ -127,8 +132,10 @@ def assert_matches_lp(
     values to within `tolerance`. Raises AssertionError with a specific,
     descriptive message on any mismatch or constraint violation, rather
     than returning a bool a caller could silently ignore.
+
+    dt_hours must match whatever `schedule` was itself solved with.
     """
-    result = simulate(schedule.charge_kw, schedule.discharge_kw, prices, battery, schedule.soc_kwh[0])
+    result = simulate(schedule.charge_kw, schedule.discharge_kw, prices, battery, schedule.soc_kwh[0], dt_hours=dt_hours)
 
     if result.soc_bounds_violated:
         raise AssertionError("backtest: SoC bounds violated in the given schedule")

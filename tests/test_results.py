@@ -122,10 +122,10 @@ def test_one_failing_day_is_excluded_and_recorded_not_fatal(monkeypatch):
 
     real_solve_day = results_module.solve_day
 
-    def flaky_solve_day(prices, battery, boundary_soc=0.5):
+    def flaky_solve_day(prices, battery, boundary_soc=0.5, dt_hours=0.5):
         if prices[0] == 0.10:  # only the bad day starts at this price
             raise RuntimeError("simulated solver failure")
-        return real_solve_day(prices, battery, boundary_soc=boundary_soc)
+        return real_solve_day(prices, battery, boundary_soc=boundary_soc, dt_hours=dt_hours)
 
     monkeypatch.setattr(results_module, "solve_day", flaky_solve_day)
 

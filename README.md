@@ -113,6 +113,35 @@ with a large evening price spike over £550/MWh): regenerate with
 Full reasoning for every metric definition and the failure-isolation
 approach: [ADR-012](DECISIONS.md#adr-012-resultspy--discharge-based-cyclesday-per-day-failure-isolation-a-full-year-fetched-for-credibility).
 
+### GB vs ERCOT — same Tier 1 optimiser, same battery, two real markets
+
+Same `solve_day()`/`backtest.py`, same battery, run against a trailing
+year of real ERCOT DAM (HB_WEST) prices instead of GB day-ahead —
+`dt_hours` generalised from each row's own `period_minutes` (1.0 for
+ERCOT's hourly settlement vs 0.5 for GB's half-hourly), see ADR-019:
+
+| Metric | GB (2025-08-14 to 2026-08-13) | ERCOT HB_WEST (2025-09-07 to 2026-09-06) |
+|---|---|---|
+| Days solved | 365/365 | 364/365 (one day, 2026-03-07, entirely missing from ERCOT's own API — not a bug here) |
+| Cumulative annual profit | £1563.72 | $1412.91 |
+| Naive baseline | £880.90 | $860.15 |
+| Uplift over naive | 77.5% | 64.3% |
+| Mean cycles/day | 1.368 | 1.299 |
+| Per kWh of capacity per year | £15.64 | $14.17 |
+| Negative-price frequency | rare | 7.38% of periods |
+
+**Not a currency-adjusted comparison** — both runs use the identical
+`degradation_cost_per_kwh=0.01` figure with no GBP/USD conversion, and the
+two windows don't overlap in calendar time, so the closeness of £15.64 vs
+$14.17 is not evidence the two markets are equally profitable once FX is
+accounted for. What the comparison *does* show cleanly: ERCOT is
+genuinely more volatile (real negative prices 7.38% of the time vs GB's
+rarity, and a real scarcity spike to $2000.02/MWh — GB never approaches
+that), yet Tier 1's uplift over naive is *lower* on ERCOT (64.3% vs
+77.5%), suggesting HB_WEST's price shape rewards simple
+charge-cheapest/discharge-priciest timing more than GB's does, relative
+to the extra room a perfect-foresight optimiser has to exploit.
+
 ### Tier 2 — MPC with a learned forecast, no perfect foresight
 
 Same battery, same real data, but the optimiser only ever sees a
@@ -231,6 +260,7 @@ brew install libomp
 
 - [x] Contracts + fetchers (`schema.py` generalised, `sources_ercot.py`, `pipeline.py` wrappers) — see [ADR-018](DECISIONS.md#adr-018-schemapy-multi-market-generalisation-and-choosing-hb_west-over-a-system-wide-average)
 - [x] `sources_ercot.py` field names confirmed against live DAM/RTM responses from a real account (2026-09-07) — no `VERIFY` tags remain; see ADR-018's 2026-09-07 update
-- [ ] Point Tier 1/Tier 2 at ERCOT data — not started
+- [x] Tier 1 pointed at ERCOT DAM (HB_WEST), full real trailing year — see the GB vs ERCOT results table above and [ADR-019](DECISIONS.md#adr-019-tier-1-generalised-to-ercot-dt_hours-from-period_minutes-and-a-full-real-year-backfilled)
+- [ ] Tier 2 (RTM + forecaster) for ERCOT — not started, deliberately deferred (real-time trading is a distinct project from day-ahead arbitrage, not just "Tier 2 with different data")
 
 **Tier 2 is now feature-complete: features → forecaster → MPC → backtest & sanity check, all built and verified against real data.**

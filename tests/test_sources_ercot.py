@@ -10,6 +10,7 @@ deliveryHour/deliveryInterval fields, and DSTFlag as a real JSON boolean.
 
 from datetime import date
 
+import pandas as pd
 import pytest
 import requests
 
@@ -23,6 +24,7 @@ from bess.sources_ercot import (
     _dam_sort_key,
     _rtm_sort_key,
     fetch_dam_prices,
+    fetch_dam_prices_range,
     fetch_rtm_prices,
     get_token,
 )
@@ -222,6 +224,40 @@ def test_fetch_dam_prices_raises_on_empty_response():
     session = _FakeSession(_payload([], DAM_FIELDS))
     with pytest.raises(AllZeroPriceSeriesError, match="no records returned"):
         fetch_dam_prices(date(2026, 7, 15), token=_token(), session=session)
+
+
+# --- fetch_dam_prices_range (bulk backfill, one request for many days) -------------
+
+
+def test_fetch_dam_prices_range_parses_multiple_days():
+    records = [_dam_record(h, 0.10 + h * 0.001, delivery_date=d) for d in ("2026-07-15", "2026-07-16", "2026-07-17") for h in range(1, 25)]
+    session = _FakeSession(_payload(records, DAM_FIELDS))
+    prices = fetch_dam_prices_range(date(2026, 7, 15), date(2026, 7, 17), token=_token(), session=session)
+
+    assert len(prices) == 72
+    for d in (date(2026, 7, 15), date(2026, 7, 16), date(2026, 7, 17)):
+        day_rows = prices[prices["settlement_date"] == pd.Timestamp(d)]
+        assert list(day_rows["settlement_period"]) == list(range(1, 25))
+
+
+def test_fetch_dam_prices_range_sends_the_full_range_and_settlement_point_filter():
+    records = [_dam_record(h, 0.10, delivery_date=d) for d in ("2026-07-15", "2026-07-16") for h in range(1, 25)]
+    session = _CapturingSession(_payload(records, DAM_FIELDS))
+    fetch_dam_prices_range(date(2026, 7, 15), date(2026, 7, 16), token=_token(), session=session)
+
+    assert session.captured_params["settlementPoint"] == HUB
+    assert session.captured_params["deliveryDateFrom"] == "2026-07-15"
+    assert session.captured_params["deliveryDateTo"] == "2026-07-16"
+
+
+def test_fetch_dam_prices_range_raises_when_response_is_paginated():
+    records = [_dam_record(h, 0.10) for h in range(1, 25)]
+    payload = _payload(records, DAM_FIELDS)
+    payload["_meta"] = {"totalPages": 9}
+    session = _FakeSession(payload)
+
+    with pytest.raises(ValueError, match="paginated"):
+        fetch_dam_prices_range(date(2026, 7, 15), date(2026, 8, 25), token=_token(), session=session)
 
 
 def test_fetch_dam_prices_raises_on_all_zero():

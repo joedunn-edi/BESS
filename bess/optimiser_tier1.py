@@ -89,11 +89,18 @@ def solve_day(
     boundary_soc: float = 0.5,
     cyclic: bool = True,
     initial_soc_kwh: float | None = None,
+    dt_hours: float = DT_HOURS,
 ) -> Tier1Schedule:
     """
     Solve the Tier 1 MILP for a price vector (£/kWh, one entry per
     settlement period, in chronological order). See the module docstring
     for the full formulation.
+
+    dt_hours (default 0.5, GB's half-hourly settlement period) is each
+    period's real duration — pass the period's own period_minutes/60 for a
+    market with a different native granularity (e.g. 1.0 for ERCOT's
+    hourly DAM). Every existing call site leaves this at the default, so
+    this parameter changes no prior GB behaviour.
 
     boundary_soc (fraction of capacity_kwh, default 0.5) is the shared,
     fixed start-of-day/end-of-day SoC — not a free decision variable. 0.5
@@ -159,13 +166,13 @@ def solve_day(
         problem += discharge[t] <= battery.power_kw * (1 - is_charging[t])
         problem += (
             soc[t + 1]
-            == soc[t] + battery.eta_charge * charge[t] * DT_HOURS - discharge[t] * DT_HOURS / battery.eta_discharge
+            == soc[t] + battery.eta_charge * charge[t] * dt_hours - discharge[t] * dt_hours / battery.eta_discharge
         )
 
     problem += pulp.lpSum(
-        prices[t] * discharge[t] * DT_HOURS
-        - prices[t] * charge[t] * DT_HOURS
-        - battery.degradation_cost_per_kwh * discharge[t] * DT_HOURS
+        prices[t] * discharge[t] * dt_hours
+        - prices[t] * charge[t] * dt_hours
+        - battery.degradation_cost_per_kwh * discharge[t] * dt_hours
         for t in range(T)
     )
 

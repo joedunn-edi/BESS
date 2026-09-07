@@ -1114,3 +1114,71 @@ All fixed in `sources_ercot.py`, with `test_sources_ercot.py` and
 `test_pipeline.py`'s ERCOT fixtures rebuilt to match the real response
 shape. Full suite (129 tests) still green. No `VERIFY` tags remain in
 `sources_ercot.py`.
+
+## ADR-019: Tier 1 generalised to ERCOT — `dt_hours` from `period_minutes`, and a full real year backfilled
+
+**Context.** With `sources_ercot.py` verified against live data (ADR-018),
+the next step was pointing Tier 1 at ERCOT DAM (HB_WEST) to compare
+against GB — the user's explicit next priority, ahead of any weather/ML
+work. This immediately hit a real blocker: `optimiser_tier1.py` and
+`backtest.py` both hardcoded `DT_HOURS = 0.5`, matching the README's
+"locked, never deviate" half-hourly convention — but ERCOT's DAM is
+hourly, not half-hourly.
+
+**Decision.** Presented three options to the user (generalise `dt_hours`
+from the data's own `period_minutes` column; resample ERCOT into
+synthetic half-hours; use RTM aggregated to 30-minute buckets instead of
+DAM). The user picked generalisation, explicitly rejecting the RTM
+substitution on the grounds that DAM-vs-DAM is the correct comparison,
+with RTM reserved for a separate future project (real-time trading with a
+forecaster — not "Tier 2 with different data", a genuinely different
+market to trade in). `solve_day()`, `simulate()`, `assert_matches_lp()`,
+and `solve_day_naive()` all gained a `dt_hours: float = 0.5` parameter,
+threaded through their internal arithmetic in place of the module
+constant; `results.py`'s `run_tier1_over_history()` now derives it per
+day from `day_df["period_minutes"].iloc[0] / 60`, and `DayResult` carries
+its own `dt_hours` so `plot_example_day()` doesn't need a fixed-width
+assumption either. Verified behaviour-preserving for GB the same way the
+schema generalisation was (ADR-018): re-ran the full real GB history
+before and after, got the identical £1563.72.
+
+**Getting real ERCOT data at scale.** The live-verification pilot (ADR-018)
+only had 14 real days, fetched one HTTP request per day via Postman. A
+full year the same way would mean 365 manual Postman-paste round trips.
+Investigating gridstatus's ERCOT scraper for an easier bulk-fetch path
+(see the "gridstatus dead end" finding logged separately) had already
+ruled that out — but the DAM endpoint itself, once understood properly,
+didn't need it: `deliveryDateFrom`/`deliveryDateTo` accept a genuine
+multi-day range and `settlementPoint` filters server-side (both confirmed
+in ADR-018), so a wide date range works in a *single* request, bounded
+only by ERCOT's 1000-record page limit (~41 days of one hub's hourly
+data). Added `fetch_dam_prices_range()` to `sources_ercot.py`, built on a
+new shared `_build_dam_frame()` helper factored out of the existing
+`fetch_dam_prices()` (which now just wraps it for the single-day case,
+unchanged behaviour) — the new function raises rather than silently
+paginating if a response comes back on more than one page, since a caller
+requesting too wide a range should get a clear error, not silently
+truncated data. `scripts/fetch_ercot_dam_full_year.py` chunks a trailing
+365-day backfill into 12 requests (~30 days/744 records each, safely
+under the page limit) rather than 365.
+
+**Result — GB vs ERCOT, real data both sides** (see README's results
+section for the full table): 364/365 ERCOT days solved (one day,
+2026-03-07, came back entirely absent from ERCOT's own API — a genuine
+gap on their side, caught and reported exactly the way ADR-008 intends,
+not a bug here). ERCOT priced real negative periods 7.38% of the time
+(GB: rare) and a genuine scarcity spike to $2000.02/MWh, yet Tier 1's
+uplift over the naive baseline was *lower* on ERCOT (64.3% vs GB's
+77.5%) — a real, mildly surprising finding worth sitting with rather than
+a suspicious one: more volatility doesn't automatically mean more room
+for a *smarter-than-naive* strategy specifically, since naive already
+captures a lot of value from big, obvious price swings.
+
+**What this comparison is explicitly NOT.** Both runs use the identical
+numeric `degradation_cost_per_kwh=0.01` with no GBP/USD conversion
+applied, and the two windows (GB: 2025-08-14 to 2026-08-13, ERCOT:
+2025-09-07 to 2026-09-06) don't overlap in calendar time. The closeness of
+£15.64 vs $14.17 per-kWh-capacity/year is therefore not evidence the two
+markets are equally profitable once FX is accounted for — flagged
+explicitly in the README rather than left for a reader to assume a
+currency-adjusted claim that was never actually made.

@@ -36,7 +36,7 @@ import pandas as pd
 from bess.backtest import assert_matches_lp, simulate
 from bess.config import Battery
 from bess.naive_baseline import solve_day_naive
-from bess.optimiser_tier1 import DT_HOURS, Tier1Schedule, solve_day
+from bess.optimiser_tier1 import Tier1Schedule, solve_day
 
 
 @dataclass(frozen=True)
@@ -47,6 +47,7 @@ class DayResult:
     tier1_profit: float
     naive_profit: float
     discharged_kwh: float  # Tier 1's discharged energy this day, for cycles/day
+    dt_hours: float  # this day's real period length — 0.5 for GB, 1.0 for ERCOT DAM
 
 
 @dataclass(frozen=True)
@@ -77,16 +78,19 @@ def run_tier1_over_history(price_history: pd.DataFrame, battery: Battery, bounda
         d = settlement_date.date()
         day_df = day_df.sort_values("settlement_period")
         prices = day_df["price_per_kwh"].to_numpy()
+        dt_hours = float(day_df["period_minutes"].iloc[0]) / 60
 
         try:
-            schedule = solve_day(prices, battery, boundary_soc=boundary_soc)
-            assert_matches_lp(schedule, prices, battery)
+            schedule = solve_day(prices, battery, boundary_soc=boundary_soc, dt_hours=dt_hours)
+            assert_matches_lp(schedule, prices, battery, dt_hours=dt_hours)
         except (RuntimeError, AssertionError) as exc:
             failed_days.append((d, str(exc)))
             continue
 
-        naive_schedule = solve_day_naive(prices, battery, boundary_soc=boundary_soc)
-        naive_result = simulate(naive_schedule.charge_kw, naive_schedule.discharge_kw, prices, battery, schedule.soc_kwh[0])
+        naive_schedule = solve_day_naive(prices, battery, boundary_soc=boundary_soc, dt_hours=dt_hours)
+        naive_result = simulate(
+            naive_schedule.charge_kw, naive_schedule.discharge_kw, prices, battery, schedule.soc_kwh[0], dt_hours=dt_hours
+        )
 
         day_results.append(
             DayResult(
@@ -95,7 +99,8 @@ def run_tier1_over_history(price_history: pd.DataFrame, battery: Battery, bounda
                 tier1_schedule=schedule,
                 tier1_profit=schedule.objective_value,
                 naive_profit=naive_result.cashflow,
-                discharged_kwh=float(schedule.discharge_kw.sum() * DT_HOURS),
+                discharged_kwh=float(schedule.discharge_kw.sum() * dt_hours),
+                dt_hours=dt_hours,
             )
         )
 
@@ -138,22 +143,23 @@ def plot_example_day(day_result: DayResult, battery: Battery, boundary_soc: floa
     """Price, charge/discharge, and SoC for one settled day."""
     schedule = day_result.tier1_schedule
     T = len(day_result.prices)
-    hours = np.arange(T) * DT_HOURS
+    dt_hours = day_result.dt_hours
+    hours = np.arange(T) * dt_hours
 
     fig, (ax_price, ax_soc) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
 
     ax_price.plot(hours, day_result.prices * 1000, color="black", label="price (£/MWh)", linewidth=1.5)
     ax_price.set_ylabel("price (£/MWh)")
     ax_power = ax_price.twinx()
-    ax_power.bar(hours, schedule.charge_kw, width=DT_HOURS, color="tab:blue", alpha=0.5, label="charge (kW)")
-    ax_power.bar(hours, -schedule.discharge_kw, width=DT_HOURS, color="tab:red", alpha=0.5, label="discharge (kW)")
+    ax_power.bar(hours, schedule.charge_kw, width=dt_hours, color="tab:blue", alpha=0.5, label="charge (kW)")
+    ax_power.bar(hours, -schedule.discharge_kw, width=dt_hours, color="tab:red", alpha=0.5, label="discharge (kW)")
     ax_power.set_ylabel("charge (+) / discharge (-) kW")
     ax_price.set_title(f"Tier 1 schedule — {day_result.settlement_date} (profit £{day_result.tier1_profit:.2f})")
     lines1, labels1 = ax_price.get_legend_handles_labels()
     lines2, labels2 = ax_power.get_legend_handles_labels()
     ax_price.legend(lines1 + lines2, labels1 + labels2, loc="upper left")
 
-    soc_hours = np.arange(T + 1) * DT_HOURS
+    soc_hours = np.arange(T + 1) * dt_hours
     ax_soc.plot(soc_hours, schedule.soc_kwh, color="tab:green", linewidth=1.5, label="SoC (kWh)")
     ax_soc.axhline(battery.soc_min * battery.capacity_kwh, color="grey", linestyle="--", linewidth=1, label="soc_min/max")
     ax_soc.axhline(battery.soc_max * battery.capacity_kwh, color="grey", linestyle="--", linewidth=1)
