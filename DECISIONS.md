@@ -1182,3 +1182,59 @@ applied, and the two windows (GB: 2025-08-14 to 2026-08-13, ERCOT:
 markets are equally profitable once FX is accounted for — flagged
 explicitly in the README rather than left for a reader to assume a
 currency-adjusted claim that was never actually made.
+
+## ADR-020: features.py generalised for ERCOT RTM, plus a DAM-price exogenous feature
+
+**Context.** The user's explicit next priority after the Tier 1
+comparison: forecasting ERCOT DAM makes no sense (Tier 1 already gets
+perfect foresight of DAM by construction — it's published a day ahead),
+so a Tier-2-style forecaster only makes sense against RTM, the genuinely
+uncertain signal. A full real RTM year was backfilled (see the bulk-fetch
+reliability fixes logged separately: per-day failure isolation in
+`fetch_dam_prices_range()`/`fetch_rtm_prices_range()`, and rate-limit
+pacing in the backfill scripts, both added after a real 41-request run
+hit a 429 and a genuine data anomaly on 2026-05-07).
+
+**The same bug, a third time.** `features.py` hardcoded `LAG_PERIODS =
+(1, 2, 48, 336)` and `hour_of_day = (settlement_period - 1) // 2` —
+assuming GB's 48-periods/day. RTM has 96 periods/day, so "yesterday"
+there is lag 96, not 48; the exact same category of bug already found in
+`schema.py` (tz/period_minutes, ADR-018) and `optimiser_tier1.py`/
+`backtest.py` (`DT_HOURS`, ADR-019).
+
+**Decision.** Generalised by deriving `periods_per_day` from each frame's
+own `period_minutes` column (same pattern as ADR-019's `dt_hours`), and
+took the opportunity to rename the two long lags from period-count names
+to semantic ones: `lag_48`/`lag_336` → `lag_1_day`/`lag_1_week`. This
+isn't just a mechanical fix — a column literally named `lag_1_day` says
+what it means regardless of market, where `lag_48` only meant "yesterday"
+by virtue of GB's specific granularity. `LAG_PERIODS` itself now only
+covers the two short, market-agnostic lags `(1, 2)`; `forecaster.py`'s
+`naive_forecast()` was updated to reference `lag_1_day` instead of the
+hardcoded `"lag_48"` string. Verified behaviour-preserving for GB by
+re-running the real Tier 2 comparison before and after: identical
+£485.43 ceiling / £335.62 MPC / £243.04 naive, 71.6 test days.
+
+**The DAM-as-feature decision.** Presented two options: port GB's feature
+set unchanged (just period-count-corrected), or add ERCOT-specific
+exogenous features from that hour's already-known DAM price. The user
+picked the latter — a real ERCOT trader genuinely has DAM's clearing
+price in hand before RTM trades that hour (DAM settles the day before),
+so this is a legitimate, leakage-safe signal GB's Tier 2 never had an
+equivalent of (GB has no second, known-in-advance price series for its
+imbalance-price forecast). Added `build_features_with_dam(rtm_df,
+dam_df)`: calls `build_features()` on the RTM data, then merges in
+`dam_price_this_hour` (matched by settlement_date + hour) and
+`rtm_minus_dam_lag_1` (= `lag_1` − `dam_price_this_hour`, the DAM/RTM
+spread as of the most recently known period — a classic real-time-trading
+feature). A period whose hour has no matching DAM row is dropped, not
+imputed, same "don't invent missing history" policy features.py already
+had for lag/rolling warm-up rows (ADR-014).
+
+**Not yet done:** the forecaster/MPC stages themselves for RTM — this ADR
+covers the feature matrix only. `forecaster.py`'s core training/predict
+logic needed no changes at all (it already picks up whatever columns
+exist in the feature frame generically via `_feature_columns()`), so
+`train_forecaster()`/`evaluate_forecaster()` should work unchanged once
+called against `build_features_with_dam()`'s output — untested against
+real RTM data until that stage is actually built.

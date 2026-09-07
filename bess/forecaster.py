@@ -59,20 +59,22 @@ def naive_forecast(features_df: pd.DataFrame, horizon: int) -> pd.Series:
     """
     "Same period yesterday" persistence, generalised to any horizon: the
     naive guess for the target `horizon` periods out is whatever the price
-    was 48 periods before *that target period*, not 48 periods before now.
-    At horizon=1 this is exactly lag_48 (price[i-48]) unshifted, as
-    specified; at horizon=48 it degenerates to price[i-1] (today's most
-    recent known price) — both are honest "persistence" guesses for their
-    own horizon, not the same fixed reference reused regardless of how far
-    out the target is.
+    was one day before *that target period*, not one day before now.
+    At horizon=1 this is exactly lag_1_day (price one day ago) unshifted,
+    as specified; at horizon=(periods per day) it degenerates to price[i-1]
+    (the most recent known price) — both are honest "persistence" guesses
+    for their own horizon, not the same fixed reference reused regardless
+    of how far out the target is.
 
-    Built from the already-computed `lag_48` column, not by re-shifting
+    Built from the already-computed `lag_1_day` column (features.py derives
+    this from the data's own period_minutes, so it means "yesterday" on
+    any market's granularity, not just GB's), not by re-shifting
     `price_per_kwh` on this (already warm-up-truncated) frame: the
     latter would needlessly reproduce NaNs for the first (horizon-1) rows
-    that `lag_48` doesn't have, since `lag_48` was computed before the
-    warm-up rows were dropped and every surviving row already has one.
+    that `lag_1_day` doesn't have, since `lag_1_day` was computed before
+    the warm-up rows were dropped and every surviving row already has one.
     """
-    return features_df["lag_48"].shift(-(horizon - 1))
+    return features_df["lag_1_day"].shift(-(horizon - 1))
 
 
 @dataclass(frozen=True)

@@ -53,7 +53,7 @@ def _synthetic_price_history(n_days: int, price_fn) -> pd.DataFrame:
 # --- naive_forecast's horizon generalisation --------------------------------------
 
 
-def test_naive_forecast_h1_matches_lag_48():
+def test_naive_forecast_h1_matches_lag_1_day():
     n_days = 12
     rng = np.random.default_rng(0)
     prices = rng.uniform(0.05, 0.30, n_days * 48)
@@ -62,7 +62,7 @@ def test_naive_forecast_h1_matches_lag_48():
 
     naive_h1 = naive_forecast(features, horizon=1)
 
-    pd.testing.assert_series_equal(naive_h1, features["lag_48"], check_names=False)
+    pd.testing.assert_series_equal(naive_h1, features["lag_1_day"], check_names=False)
 
 
 def test_naive_forecast_h48_degenerates_to_most_recent_price():
@@ -71,7 +71,7 @@ def test_naive_forecast_h48_degenerates_to_most_recent_price():
     # -series proxy expression — a plain shift(1) of the truncated frame
     # has different (and less complete) edge behaviour at *both* ends:
     # naive_forecast() can reach further back at the leading edge (via
-    # lag_48, computed before warm-up rows were dropped) and correctly
+    # lag_1_day, computed before warm-up rows were dropped) and correctly
     # runs out 47 rows earlier at the trailing edge (it needs to see 47
     # periods ahead, same as _target_for_horizon(h=48) would) — neither
     # edge matches a same-length shift(1) of the already-truncated series.

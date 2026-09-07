@@ -261,6 +261,7 @@ brew install libomp
 - [x] Contracts + fetchers (`schema.py` generalised, `sources_ercot.py`, `pipeline.py` wrappers) — see [ADR-018](DECISIONS.md#adr-018-schemapy-multi-market-generalisation-and-choosing-hb_west-over-a-system-wide-average)
 - [x] `sources_ercot.py` field names confirmed against live DAM/RTM responses from a real account (2026-09-07) — no `VERIFY` tags remain; see ADR-018's 2026-09-07 update
 - [x] Tier 1 pointed at ERCOT DAM (HB_WEST), full real trailing year — see the GB vs ERCOT results table above and [ADR-019](DECISIONS.md#adr-019-tier-1-generalised-to-ercot-dt_hours-from-period_minutes-and-a-full-real-year-backfilled)
-- [ ] Tier 2 (RTM + forecaster) for ERCOT — not started, deliberately deferred (real-time trading is a distinct project from day-ahead arbitrage, not just "Tier 2 with different data")
+- [x] `features.py` generalised to any `period_minutes` (`lag_1_day`/`lag_1_week` replace GB-hardcoded `lag_48`/`lag_336`), plus `build_features_with_dam()` for ERCOT's DAM-price exogenous features — see [ADR-020](DECISIONS.md#adr-020-featurespy-generalised-for-ercot-rtm-plus-a-dam-price-exogenous-feature). Full real RTM year backfilled (`data/ercot_rtm_west.parquet`, 34798/35040 periods).
+- [ ] Forecaster + MPC trained/backtested on real ERCOT RTM data — not started; `forecaster.py`'s training logic needs no changes, untested against real RTM data yet
 
 **Tier 2 is now feature-complete: features → forecaster → MPC → backtest & sanity check, all built and verified against real data.**
