@@ -1238,3 +1238,48 @@ exist in the feature frame generically via `_feature_columns()`), so
 `train_forecaster()`/`evaluate_forecaster()` should work unchanged once
 called against `build_features_with_dam()`'s output — untested against
 real RTM data until that stage is actually built.
+
+**Update (2026-09-10) — a real bug found before the forecaster stage
+could even run, and Part 2 (the forecaster itself) completed.**
+
+`build_features()`/`build_features_with_dam()` called
+`schema.validate()` without passing `tz` through at all — always
+defaulting to `LONDON`, regardless of what market the data actually came
+from. Caught immediately on real data, not by inspection: building
+features from the real cached RTM year raised `SchemaValidationError` on
+two dates — `2025-11-02` (a genuine 25-hour US fall-back day, which
+`LONDON`'s DST calendar doesn't recognise as special) and `2026-03-29`
+(GB's *own* spring-forward date, being wrongly applied to Chicago data
+that has no transition that day at all). Fixed by adding `tz: ZoneInfo =
+LONDON` to both functions' signatures, threaded through to their internal
+`validate()` calls — the same generalisation `pipeline.py`/`results.py`
+already needed (ADR-018/019), just missed in this one spot. A regression
+test (`test_build_features_uses_the_given_tz_across_a_real_us_dst_transition`)
+builds a real US-DST-spanning window and confirms `build_features(df,
+tz=CHICAGO)` no longer raises. GB behaviour unchanged (default still
+`LONDON`) — full suite green before and after.
+
+**Part 2 result — `scripts/evaluate_rtm_forecaster.py`, real full RTM
+year, 5-fold expanding-window CV, same horizon-in-time-spans GB's own
+forecaster stage used (15 min / 1 h / 3 h / 6 h / 12 h / 24 h):**
+
+| horizon (15-min periods) | model MAE | naive MAE | model beats naive |
+|---|---|---|---|
+| 1 (15 min) | 0.00525 | 0.02506 | yes, by ~4.8x |
+| 4 (1 h) | 0.00995 | 0.02506 | yes |
+| 12 (3 h) | 0.01608 | 0.02506 | yes |
+| 24 (6 h) | 0.01969 | 0.02507 | yes |
+| 48 (12 h) | 0.02185 | 0.02507 | yes |
+| 96 (24 h) | 0.02216 | 0.02510 | **yes, even here** |
+
+Unlike GB's forecaster (ADR-015), which stopped beating naive past
+horizon 12 (6h), this one beats naive at every horizon tested, including
+a full day out. The likely explanation is the DAM-price feature: GB's
+forecaster only had lags/calendar features, which necessarily carry less
+information the further out the target is — but ERCOT's `dam_price_this_hour`
+is known for the *entire next day* at once, so it stays exactly as
+informative at horizon 96 as it is at horizon 1. Not yet proven by
+ablation (i.e. this is the plausible explanation, not yet confirmed by
+re-running without the DAM features) — worth doing before leaning on this
+finding too hard, but a strong signal the DAM-as-feature decision (this
+ADR, above) was the right call.

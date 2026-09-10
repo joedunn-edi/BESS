@@ -262,6 +262,7 @@ brew install libomp
 - [x] `sources_ercot.py` field names confirmed against live DAM/RTM responses from a real account (2026-09-07) — no `VERIFY` tags remain; see ADR-018's 2026-09-07 update
 - [x] Tier 1 pointed at ERCOT DAM (HB_WEST), full real trailing year — see the GB vs ERCOT results table above and [ADR-019](DECISIONS.md#adr-019-tier-1-generalised-to-ercot-dt_hours-from-period_minutes-and-a-full-real-year-backfilled)
 - [x] `features.py` generalised to any `period_minutes` (`lag_1_day`/`lag_1_week` replace GB-hardcoded `lag_48`/`lag_336`), plus `build_features_with_dam()` for ERCOT's DAM-price exogenous features — see [ADR-020](DECISIONS.md#adr-020-featurespy-generalised-for-ercot-rtm-plus-a-dam-price-exogenous-feature). Full real RTM year backfilled (`data/ercot_rtm_west.parquet`, 34798/35040 periods).
-- [ ] Forecaster + MPC trained/backtested on real ERCOT RTM data — not started; `forecaster.py`'s training logic needs no changes, untested against real RTM data yet
+- [x] Forecaster trained/evaluated on real ERCOT RTM+DAM data (`scripts/evaluate_rtm_forecaster.py`) — beats naive at every horizon tested, including 24h out (unlike GB's, which loses past 6h) — see ADR-020's 2026-09-10 update
+- [ ] MPC controller backtested on real ERCOT RTM data — not started; `mpc.py`'s `run_mpc()` still hardcodes `dt_hours=0.5` internally (fine for GB, wrong for RTM's 15-min periods) and needs the same generalisation `optimiser_tier1.py`/`backtest.py` already got (ADR-019)
 
 **Tier 2 is now feature-complete: features → forecaster → MPC → backtest & sanity check, all built and verified against real data.**

@@ -35,9 +35,11 @@ regardless of granularity.
 
 from __future__ import annotations
 
+from zoneinfo import ZoneInfo
+
 import pandas as pd
 
-from bess.schema import validate
+from bess.schema import LONDON, validate
 
 LAG_PERIODS = (1, 2)  # t-1, t-2 — market-agnostic; day/week lags are separate, see below
 
@@ -53,7 +55,7 @@ def longest_lookback_periods(period_minutes: int) -> int:
     return _periods_per_day(period_minutes) * 7
 
 
-def build_features(price_df: pd.DataFrame) -> pd.DataFrame:
+def build_features(price_df: pd.DataFrame, tz: ZoneInfo = LONDON) -> pd.DataFrame:
     """
     Build the Tier 2 feature matrix from a canonical price DataFrame.
     Returns one row per period with a fully-populated feature set, plus
@@ -61,8 +63,13 @@ def build_features(price_df: pd.DataFrame) -> pd.DataFrame:
     not a feature — callers building X/y for training must exclude it
     from X). Rows without enough history for every lag/rolling feature
     are dropped entirely.
+
+    tz must match whatever market `price_df` actually came from (default
+    Europe/London — GB) — schema.validate()'s own DST-aware period-count
+    check depends on it; pass tz=CHICAGO for ERCOT data, same as
+    pipeline.py/results.py already do elsewhere.
     """
-    df = validate(price_df).reset_index(drop=True)
+    df = validate(price_df, tz=tz).reset_index(drop=True)
     price = df["price_per_kwh"]
     period_minutes = int(df["period_minutes"].iloc[0])
     periods_per_day = _periods_per_day(period_minutes)
@@ -98,7 +105,7 @@ def build_features(price_df: pd.DataFrame) -> pd.DataFrame:
     return features.dropna().reset_index(drop=True)
 
 
-def build_features_with_dam(rtm_df: pd.DataFrame, dam_df: pd.DataFrame) -> pd.DataFrame:
+def build_features_with_dam(rtm_df: pd.DataFrame, dam_df: pd.DataFrame, tz: ZoneInfo = LONDON) -> pd.DataFrame:
     """
     build_features() for ERCOT RTM, plus two exogenous features from that
     hour's DAM clearing price — genuinely known in advance, since DAM
@@ -113,14 +120,17 @@ def build_features_with_dam(rtm_df: pd.DataFrame, dam_df: pd.DataFrame) -> pd.Da
 
     A period whose hour has no matching DAM row (e.g. DAM had a gap that
     day) is dropped, same "don't invent it" policy as a missing lag.
+
+    tz must match rtm_df's actual market (pass tz=CHICAGO for real ERCOT
+    data) — see build_features()'s docstring for why.
     """
-    features = build_features(rtm_df)
+    features = build_features(rtm_df, tz=tz)
 
     dam = dam_df.copy()
     dam["hour_of_day"] = dam["settlement_period"] - 1  # DAM is hourly: period IS the hour
     dam_by_hour = dam.set_index(["settlement_date", "hour_of_day"])["price_per_kwh"]
 
-    rtm = validate(rtm_df).reset_index(drop=True)
+    rtm = validate(rtm_df, tz=tz).reset_index(drop=True)
     rtm_settlement_date = rtm.set_index("timestamp_utc")["settlement_date"].reindex(features["timestamp_utc"]).to_numpy()
     key = pd.MultiIndex.from_arrays([rtm_settlement_date, features["hour_of_day"].to_numpy()])
     features["dam_price_this_hour"] = dam_by_hour.reindex(key).to_numpy()

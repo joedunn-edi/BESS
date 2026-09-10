@@ -16,9 +16,10 @@ import pandas as pd
 import pytest
 
 from bess.features import LAG_PERIODS, build_features, build_features_with_dam, longest_lookback_periods
+from bess.sources_ercot import CHICAGO
 
 ROLLING_WINDOW = 48  # GB default: 24h at 30-min periods, matches build_features()'s own periods_per_day
-from bess.schema import settlement_day_utc_bounds, validate
+from bess.schema import expected_period_count, settlement_day_utc_bounds, validate
 
 
 def _synthetic_price_history(n_days: int, price_fn) -> pd.DataFrame:
@@ -327,3 +328,43 @@ def test_build_features_with_dam_drops_rows_with_no_matching_dam_data():
     assert not features.isna().any().any()
     last_day = date(2026, 1, 1) + timedelta(days=n_days - 1)
     assert (features["timestamp_utc"].dt.date < last_day).all()
+
+
+# --- tz generalisation (regression: build_features used to ignore tz entirely) -----
+
+
+def test_build_features_uses_the_given_tz_across_a_real_us_dst_transition():
+    # regression test: build_features()/build_features_with_dam() used to
+    # call schema.validate() without passing tz through at all, so a real
+    # US DST date (2025-11-02, a 25-hour fall-back day at Chicago's own
+    # calendar) got checked against LONDON's DST calendar instead and
+    # raised SchemaValidationError on real ERCOT RTM data — this must not
+    # happen when the correct tz is passed.
+    start_date, end_date = date(2025, 10, 30), date(2025, 11, 4)  # spans the transition
+    rows = []
+    d = start_date
+    while d <= end_date:
+        start_utc, _ = settlement_day_utc_bounds(d, tz=CHICAGO)
+        n_periods = expected_period_count(d, tz=CHICAGO, period_minutes=15)
+        for period in range(1, n_periods + 1):
+            rows.append(
+                {
+                    "timestamp_utc": start_utc + timedelta(minutes=15 * (period - 1)),
+                    "settlement_date": pd.Timestamp(d),
+                    "settlement_period": period,
+                    "period_minutes": 15,
+                    "price_per_kwh": 0.03,
+                    "currency": "USD",
+                    "source": "test",
+                }
+            )
+        d += timedelta(days=1)
+
+    df = pd.DataFrame(rows)
+    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True)
+    df["settlement_period"] = df["settlement_period"].astype("int64")
+    df["period_minutes"] = df["period_minutes"].astype("int64")
+    df["price_per_kwh"] = df["price_per_kwh"].astype("float64")
+    df = validate(df, tz=CHICAGO)
+
+    build_features(df, tz=CHICAGO)  # must not raise
