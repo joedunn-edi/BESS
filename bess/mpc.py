@@ -37,7 +37,7 @@ import pandas as pd
 from bess.backtest import simulate
 from bess.config import Battery
 from bess.forecaster import Tier2Forecaster
-from bess.optimiser_tier1 import solve_day
+from bess.optimiser_tier1 import DT_HOURS, solve_day
 
 
 @dataclass(frozen=True)
@@ -54,6 +54,7 @@ def run_mpc(
     battery: Battery,
     horizon: int = 12,
     initial_soc_kwh: float | None = None,
+    dt_hours: float = DT_HOURS,
 ) -> MPCResult:
     """
     Roll forward one period at a time over features_df (features.py's
@@ -73,6 +74,10 @@ def run_mpc(
     `forecaster` must have a trained model for every horizon 1..`horizon`
     (Tier2Forecaster.predict() raises if one is missing, rather than
     silently falling back to a shorter horizon).
+
+    dt_hours (default 0.5, GB) must match features_df's actual period
+    length — pass e.g. 0.25 for ERCOT RTM's 15-minute periods, same
+    generalisation optimiser_tier1.py/backtest.py already got (ADR-019).
     """
     T = len(features_df)
     if initial_soc_kwh is None:
@@ -95,6 +100,7 @@ def run_mpc(
             battery,
             cyclic=False,
             initial_soc_kwh=soc_kwh[t],
+            dt_hours=dt_hours,
         )
 
         charge_kw[t] = schedule.charge_kw[0]
@@ -108,6 +114,7 @@ def run_mpc(
             real_prices[t : t + 1],
             battery,
             soc_kwh[t],
+            dt_hours=dt_hours,
         )
         soc_kwh[t + 1] = step_result.soc_kwh[1]
         cashflow += step_result.cashflow

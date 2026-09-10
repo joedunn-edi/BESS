@@ -76,6 +76,7 @@ def run_tier2_comparison(
     horizon: int = 12,
     train_fraction: float = 0.8,
     boundary_soc: float = 0.5,
+    dt_hours: float = DT_HOURS,
 ) -> Tier2Comparison:
     """
     Train the forecaster on the earlier `train_fraction` of the feature
@@ -83,12 +84,19 @@ def run_tier2_comparison(
     against Tier 1/naive computed on that SAME held-out date range.
     `price_history` is the raw canonical price data (results.py's Tier 1
     runner needs this shape, not the feature matrix).
+
+    dt_hours (default 0.5, GB) must match price_history/features_df's
+    actual period length — pass e.g. 0.25 for ERCOT RTM. run_tier1_over_history()
+    needs no such parameter: it already derives its own per-day dt_hours
+    from price_history's period_minutes column (ADR-019).
     """
     train_features, test_features = chronological_train_test_split(features_df, train_fraction)
     forecaster = train_forecaster(train_features, horizons=range(1, horizon + 1))
 
     initial_soc_kwh = boundary_soc * battery.capacity_kwh
-    mpc_result = run_mpc(test_features, forecaster, battery, horizon=horizon, initial_soc_kwh=initial_soc_kwh)
+    mpc_result = run_mpc(
+        test_features, forecaster, battery, horizon=horizon, initial_soc_kwh=initial_soc_kwh, dt_hours=dt_hours
+    )
 
     test_start = test_features["timestamp_utc"].iloc[0]
     test_end = test_features["timestamp_utc"].iloc[-1]
@@ -116,13 +124,17 @@ def run_tier2_comparison(
     # isn't actually an upper bound on MPC. Found empirically (a synthetic
     # test genuinely produced MPC > that "ceiling"), not assumed — ADR-017.
     ceiling_schedule = solve_day(
-        test_price_history["price_per_kwh"].to_numpy(), battery, cyclic=False, initial_soc_kwh=initial_soc_kwh
+        test_price_history["price_per_kwh"].to_numpy(),
+        battery,
+        cyclic=False,
+        initial_soc_kwh=initial_soc_kwh,
+        dt_hours=dt_hours,
     )
     tier1_total = ceiling_schedule.objective_value
 
     usable_capacity_kwh = (battery.soc_max - battery.soc_min) * battery.capacity_kwh
-    n_test_days = len(test_features) * DT_HOURS / 24
-    mpc_discharged_kwh = float(mpc_result.discharge_kw.sum() * DT_HOURS)
+    n_test_days = len(test_features) * dt_hours / 24
+    mpc_discharged_kwh = float(mpc_result.discharge_kw.sum() * dt_hours)
     mpc_mean_cycles_per_day = (mpc_discharged_kwh / usable_capacity_kwh) / n_test_days if n_test_days else 0.0
 
     return Tier2Comparison(
@@ -165,23 +177,27 @@ def corrupted_forecast_check(
     horizon: int = 12,
     initial_soc_kwh: float | None = None,
     seed: int = 0,
+    dt_hours: float = DT_HOURS,
 ) -> MPCResult:
     """Run MPC with predictions decoupled from the actual situation and
     return the result — see _ShuffledForecaster."""
     corrupted = _ShuffledForecaster(real_forecaster=forecaster, reference_features=test_features, seed=seed)
-    return run_mpc(test_features, corrupted, battery, horizon=horizon, initial_soc_kwh=initial_soc_kwh)
+    return run_mpc(test_features, corrupted, battery, horizon=horizon, initial_soc_kwh=initial_soc_kwh, dt_hours=dt_hours)
 
 
-def plot_comparison(naive_total: float, mpc_total: float, tier1_total: float, output_path: str) -> None:
-    """naive <= MPC <= Tier 1 ceiling, as a bar chart, with % of ceiling captured as the punchline."""
+def plot_comparison(
+    naive_total: float, mpc_total: float, tier1_total: float, output_path: str, currency_symbol: str = "£"
+) -> None:
+    """naive <= MPC <= Tier 1 ceiling, as a bar chart, with % of ceiling captured as the punchline.
+    currency_symbol defaults to £ (GB) — pass "$" for ERCOT."""
     fig, ax = plt.subplots(figsize=(6, 5))
     labels = ["Naive", "MPC (Tier 2)", "Tier 1\n(perfect foresight)"]
     values = [naive_total, mpc_total, tier1_total]
     bars = ax.bar(labels, values, color=["tab:gray", "tab:blue", "tab:green"])
     for bar, value in zip(bars, values):
-        ax.text(bar.get_x() + bar.get_width() / 2, value, f"£{value:.2f}", ha="center", va="bottom")
+        ax.text(bar.get_x() + bar.get_width() / 2, value, f"{currency_symbol}{value:.2f}", ha="center", va="bottom")
     pct = 100 * mpc_total / tier1_total if tier1_total else float("nan")
-    ax.set_ylabel("total profit over held-out test period (£)")
+    ax.set_ylabel(f"total profit over held-out test period ({currency_symbol})")
     ax.set_title(f"MPC captures {pct:.0f}% of the Tier 1 ceiling")
     fig.tight_layout()
     fig.savefig(output_path, dpi=120)

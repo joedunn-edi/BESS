@@ -1283,3 +1283,70 @@ ablation (i.e. this is the plausible explanation, not yet confirmed by
 re-running without the DAM features) — worth doing before leaning on this
 finding too hard, but a strong signal the DAM-as-feature decision (this
 ADR, above) was the right call.
+
+## ADR-021: ERCOT Tier 2, part 3 — MPC backtest, and a genuine "MPC loses to naive" finding
+
+**Context.** With the RTM forecaster built and validated (ADR-020), the
+next stage was the MPC controller itself — `mpc.py`/`results_tier2.py`,
+already market-agnostic in every other respect, still hardcoded
+`dt_hours=0.5` internally (the one remaining instance of the bug ADR-019
+generalised everywhere else). Fixed the same way: `run_mpc()`,
+`run_tier2_comparison()`, and `corrupted_forecast_check()` all gained a
+`dt_hours` parameter (default 0.5, GB), threaded through their internal
+`solve_day()`/`simulate()` calls. `plot_comparison()` also had a hardcoded
+`£` symbol, generalised to a `currency_symbol` parameter. Verified
+behaviour-preserving for GB: re-ran the real Tier 2 comparison, identical
+£485.43/£335.62/£243.04.
+
+**The horizon decision.** GB's MPC re-solves a 12-period (6h) look-ahead
+at every step. RTM has 4x the periods/hour, so a literal period-count
+port would only look 3h ahead. Presented three options — same period
+count (3h), same time span (6h = 24 periods), or a longer horizon given
+the forecaster's own accuracy holding up to 24h out (ADR-020, Part 2).
+The user picked the longer horizon (96 periods = 24h), on the reasoning
+that a controller which only looked 6h ahead would be discarding known-
+good longer-range signal the forecaster had already demonstrated it has.
+Checked the compute cost empirically before committing to a full run: a
+20-step timing probe projected ~7 minutes for the full ~6800-step MPC
+backtest at horizon=96, and the single whole-window ceiling MILP (a
+different, larger solve) took 1.9s — both comfortably fast enough to run
+for real rather than staying hypothetical.
+
+**Result — `scripts/evaluate_rtm_mpc.py`, real full RTM+DAM year, same
+71-day-equivalent held-out window GB's own Tier 2 comparison used the
+GB-equivalent of:**
+
+| Strategy | Total profit (held-out 70.8 days) |
+|---|---|
+| Tier 1 ceiling (perfect foresight, RTM prices) | $374.05 |
+| Naive (full real-data foresight, simple rule) | $214.94 |
+| **MPC (Tier 2)** | **$195.65 (52.3% of ceiling)** |
+| MPC with a deliberately corrupted forecast | **-$270.07** |
+
+**MPC underperforms naive here** — the opposite of GB, where MPC clearly
+beat naive (£335.62 vs £243.04, ADR-017). Not smoothed over or re-run
+until it looked better: the corrupted-forecast check is exactly what
+rules out a leakage bug as the explanation. It collapses to -$270.07, a
+huge gap below both the real MPC result and naive — proof the real,
+trained forecaster is doing genuine work relative to random noise, the
+SoC handoff and feature machinery are sound, and this isn't a repeat of
+ADR-016/017's leakage concerns. The forecaster just isn't accurate enough
+at the *tails* to beat a strategy with perfect real-data foresight, on a
+market this volatile (recall ADR-018/`compare_gb_ercot.py`: ERCOT's
+coefficient of variation is 5x GB's, kurtosis 357 vs 8.2).
+
+**The likely mechanism, not yet independently confirmed:** `naive`
+("naive" only in decision-rule simplicity) gets the battery's actual real
+prices for the day and just applies a simple charge-cheapest/discharge-
+priciest rule — it never has to predict anything. MPC's LP only ever sees
+a *forecast*. A model trained to minimise MAE/RMSE is pulled toward the
+conditional mean, which systematically under-calls the exact magnitude
+and timing of extreme spikes — exactly the events a fat-tailed market
+like ERCOT RTM is dominated by (a $2000/MWh DAM spike, real 15-min RTM
+prices past $1500/MWh). GB's own Tier 2 already gave up ~31% of its
+ceiling to imperfect foresight (ADR-017); ERCOT's much fatter tails make
+that same gap large enough to fall below naive entirely, not just short
+of the ceiling. Plausible and consistent with everything measured so far,
+but not proven by, e.g., inspecting the forecaster's errors specifically
+during the biggest realised price swings — a natural next check before
+leaning on this explanation as settled fact.

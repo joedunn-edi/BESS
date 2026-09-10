@@ -176,6 +176,41 @@ number directly and a test caught MPC legitimately exceeding it — full
 story in
 [ADR-017](DECISIONS.md#adr-017-results_tier2py--chronological-traintest-split-and-a-same-structure-ceiling).
 
+### Tier 2 for ERCOT — same real-time-market question, opposite answer
+
+Same MPC controller, same battery, but real ERCOT RTM (15-minute) prices
+instead of GB's imbalance price, with a longer 24h look-ahead (the
+forecaster stayed accurate that far out — see the Tier 2 forecaster
+comparison above) and `dam_price_this_hour`/`rtm_minus_dam_lag_1` as
+extra features (ADR-020), since DAM settles the day before RTM trades:
+
+| Strategy | Total profit (held-out 70.8 days) |
+|---|---|
+| Tier 1 ceiling (perfect foresight, RTM prices) | $374.05 |
+| Naive baseline (full real-data foresight, simple rule) | $214.94 |
+| **MPC (Tier 2)** | **$195.65 (52.3% of ceiling)** |
+| MPC with a deliberately corrupted forecast | **-$270.07** |
+
+![ERCOT RTM: Tier 1 vs MPC vs naive](results/ercot_rtm_tier2_comparison.png)
+
+**MPC loses to naive here — the opposite of GB.** Not a bug: the
+corrupted-forecast row rules that out the same way it did for GB, and
+rules it out hard — collapsing to -$270.07, a huge gap below both the
+real MPC result and naive, confirming the real forecaster is doing
+genuine work and the SoC handoff/feature machinery is sound. The likely
+explanation (plausible, not yet independently confirmed): naive gets the
+battery the *actual real prices* for the day and just applies a simple
+rule — it never has to predict anything, while MPC only ever sees a
+forecast. A model trained on MAE/RMSE is pulled toward the conditional
+mean, which systematically under-calls the exact size and timing of
+extreme spikes — precisely what a market with ERCOT's fat tails is
+dominated by (recall the [GB vs ERCOT comparison](#gb-vs-ercot--same-tier-1-optimiser-same-battery-two-real-markets)
+above: 5x GB's coefficient of variation, kurtosis 357 vs 8.2). GB's own
+MPC already gave up ~31% of its ceiling to imperfect foresight; ERCOT's
+much fatter tails make that gap large enough to fall below naive
+entirely, not just short of the ceiling. Full reasoning:
+[ADR-021](DECISIONS.md#adr-021-ercot-tier-2-part-3--mpc-backtest-and-a-genuine-mpc-loses-to-naive-finding).
+
 ## Project layout
 
 ```
@@ -263,6 +298,6 @@ brew install libomp
 - [x] Tier 1 pointed at ERCOT DAM (HB_WEST), full real trailing year — see the GB vs ERCOT results table above and [ADR-019](DECISIONS.md#adr-019-tier-1-generalised-to-ercot-dt_hours-from-period_minutes-and-a-full-real-year-backfilled)
 - [x] `features.py` generalised to any `period_minutes` (`lag_1_day`/`lag_1_week` replace GB-hardcoded `lag_48`/`lag_336`), plus `build_features_with_dam()` for ERCOT's DAM-price exogenous features — see [ADR-020](DECISIONS.md#adr-020-featurespy-generalised-for-ercot-rtm-plus-a-dam-price-exogenous-feature). Full real RTM year backfilled (`data/ercot_rtm_west.parquet`, 34798/35040 periods).
 - [x] Forecaster trained/evaluated on real ERCOT RTM+DAM data (`scripts/evaluate_rtm_forecaster.py`) — beats naive at every horizon tested, including 24h out (unlike GB's, which loses past 6h) — see ADR-020's 2026-09-10 update
-- [ ] MPC controller backtested on real ERCOT RTM data — not started; `mpc.py`'s `run_mpc()` still hardcodes `dt_hours=0.5` internally (fine for GB, wrong for RTM's 15-min periods) and needs the same generalisation `optimiser_tier1.py`/`backtest.py` already got (ADR-019)
+- [x] MPC controller backtested on real ERCOT RTM+DAM data (`scripts/evaluate_rtm_mpc.py`) — genuine finding: MPC *loses* to naive here (opposite of GB) — see [ADR-021](DECISIONS.md#adr-021-ercot-tier-2-part-3--mpc-backtest-and-a-genuine-mpc-loses-to-naive-finding)
 
 **Tier 2 is now feature-complete: features → forecaster → MPC → backtest & sanity check, all built and verified against real data.**
