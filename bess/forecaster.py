@@ -93,31 +93,71 @@ class Tier2Forecaster:
         return pd.DataFrame({h: self.models[h].predict(X[self.feature_columns]) for h in horizons}, index=X.index)
 
 
-def train_forecaster(features_df: pd.DataFrame, horizons: Iterable[int]) -> Tier2Forecaster:
+def train_forecaster(
+    features_df: pd.DataFrame, horizons: Iterable[int], model_kwargs: dict | None = None
+) -> Tier2Forecaster:
     """Train one LightGBM model per horizon on all rows in `features_df`
-    that have a valid (non-NaN) target for that horizon."""
+    that have a valid (non-NaN) target for that horizon.
+
+    model_kwargs is passed straight to lgb.LGBMRegressor() alongside the
+    fixed random_state/verbosity — e.g. {"objective": "quantile", "alpha":
+    0.85} to train against a quantile loss instead of the default L2 (see
+    evaluate_forecaster()'s docstring for why that matters for a
+    controller like mpc.py, which cares about not undercalling the
+    highest-value moments, not about average accuracy)."""
     feature_columns = _feature_columns(features_df)
+    model_kwargs = model_kwargs or {}
     models: dict[int, lgb.LGBMRegressor] = {}
 
     for horizon in horizons:
         target = _target_for_horizon(features_df, horizon)
         valid = target.notna()
-        model = lgb.LGBMRegressor(random_state=0, verbosity=-1)
+        model = lgb.LGBMRegressor(random_state=0, verbosity=-1, **model_kwargs)
         model.fit(features_df.loc[valid, feature_columns], target.loc[valid])
         models[horizon] = model
 
     return Tier2Forecaster(models=models, feature_columns=feature_columns)
 
 
-def evaluate_forecaster(features_df: pd.DataFrame, horizons: Iterable[int], n_splits: int = 5) -> pd.DataFrame:
+def evaluate_forecaster(
+    features_df: pd.DataFrame,
+    horizons: Iterable[int],
+    n_splits: int = 5,
+    model_kwargs: dict | None = None,
+    top_decile: float = 0.9,
+) -> pd.DataFrame:
     """
-    Time-series cross-validated MAE/RMSE per horizon, model vs naive,
+    Time-series cross-validated MAE/RMSE/bias per horizon, model vs naive,
     averaged across folds. Uses an expanding window (TimeSeriesSplit's
     default): each fold trains on all data before a cutoff and validates
     on a later, entirely unseen chunk — the split never trains on data
     later than what it validates on.
+
+    model_kwargs is passed straight to lgb.LGBMRegressor() (alongside the
+    fixed random_state/verbosity) — e.g. {"objective": "quantile", "alpha":
+    0.75} to compare a quantile-loss model against the L2 (mean-predicting)
+    default, without changing what's being measured.
+
+    model_mae/naive_mae is the plain answer to "on average, how close is
+    the forecast to the true value" — mean *absolute* error, in the same
+    units as price_per_kwh. model_max_error/naive_max_error answers "the
+    furthest it gets" — the single largest absolute error seen anywhere
+    across every fold's test predictions (not an average of each fold's
+    own worst case, which would understate the true worst case).
+
+    MAE/RMSE/max_error are all magnitude-only, though: a model that's off
+    by the same amount in both directions looks identical to one that's
+    consistently biased. bias/top_decile_bias make the *direction*
+    visible — bias is the mean signed error (pred - actual) over the
+    whole fold; top_decile_bias is the same, restricted to rows where the
+    actual price was in the top `top_decile` fraction of that fold's
+    realised prices (default 0.9 = top 10%) — the exact question "does
+    this model systematically undercall the highest-value moments?", the
+    thing that predicts whether a downstream controller like mpc.py will
+    undersize its response, without needing to run mpc.py to find out.
     """
     feature_columns = _feature_columns(features_df)
+    model_kwargs = model_kwargs or {}
     rows = []
 
     for horizon in horizons:
@@ -129,25 +169,45 @@ def evaluate_forecaster(features_df: pd.DataFrame, horizons: Iterable[int], n_sp
         y = target.loc[valid].reset_index(drop=True)
         naive_y = naive.loc[valid].reset_index(drop=True)
 
-        model_mae, model_rmse, naive_mae, naive_rmse = [], [], [], []
+        model_mae, model_rmse, model_bias, model_top_bias = [], [], [], []
+        naive_mae, naive_rmse, naive_bias, naive_top_bias = [], [], [], []
+        model_abs_errors, naive_abs_errors = [], []
         for train_idx, test_idx in TimeSeriesSplit(n_splits=n_splits).split(X):
-            model = lgb.LGBMRegressor(random_state=0, verbosity=-1)
+            model = lgb.LGBMRegressor(random_state=0, verbosity=-1, **model_kwargs)
             model.fit(X.iloc[train_idx], y.iloc[train_idx])
             pred = model.predict(X.iloc[test_idx])
-            y_test = y.iloc[test_idx]
+            y_test = y.iloc[test_idx].to_numpy()
+            naive_pred = naive_y.iloc[test_idx].to_numpy()
 
             model_mae.append(mean_absolute_error(y_test, pred))
             model_rmse.append(root_mean_squared_error(y_test, pred))
-            naive_mae.append(mean_absolute_error(y_test, naive_y.iloc[test_idx]))
-            naive_rmse.append(root_mean_squared_error(y_test, naive_y.iloc[test_idx]))
+            naive_mae.append(mean_absolute_error(y_test, naive_pred))
+            naive_rmse.append(root_mean_squared_error(y_test, naive_pred))
+
+            model_bias.append(float(np.mean(pred - y_test)))
+            naive_bias.append(float(np.mean(naive_pred - y_test)))
+            model_abs_errors.append(np.abs(pred - y_test))
+            naive_abs_errors.append(np.abs(naive_pred - y_test))
+
+            top_mask = y_test >= np.quantile(y_test, top_decile)
+            model_top_bias.append(float(np.mean(pred[top_mask] - y_test[top_mask])) if top_mask.any() else float("nan"))
+            naive_top_bias.append(
+                float(np.mean(naive_pred[top_mask] - y_test[top_mask])) if top_mask.any() else float("nan")
+            )
 
         rows.append(
             {
                 "horizon": horizon,
                 "model_mae": float(np.mean(model_mae)),
                 "model_rmse": float(np.mean(model_rmse)),
+                "model_max_error": float(np.max(np.concatenate(model_abs_errors))),
+                "model_bias": float(np.mean(model_bias)),
+                "model_top_decile_bias": float(np.mean(model_top_bias)),
                 "naive_mae": float(np.mean(naive_mae)),
                 "naive_rmse": float(np.mean(naive_rmse)),
+                "naive_max_error": float(np.max(np.concatenate(naive_abs_errors))),
+                "naive_bias": float(np.mean(naive_bias)),
+                "naive_top_decile_bias": float(np.mean(naive_top_bias)),
             }
         )
 

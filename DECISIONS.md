@@ -1350,3 +1350,75 @@ of the ceiling. Plausible and consistent with everything measured so far,
 but not proven by, e.g., inspecting the forecaster's errors specifically
 during the biggest realised price swings — a natural next check before
 leaning on this explanation as settled fact.
+
+**Update (2026-09-11 to 2026-09-15) — the mechanism confirmed, and two
+plausible fixes tried and disproven.**
+
+Inspecting the forecaster's errors by hour-of-day (the natural next check
+flagged above) confirmed the mechanism directly: at horizon 1 the model's
+peak-hour predictions are accurate (even slightly over), but by horizon
+24 the model undercalls the peak hour by ~24%, and by horizon 96 by
+~31%. Not a generic accuracy problem — a specific, horizon-dependent bias
+concentrated exactly at the highest-value hour.
+
+Two natural-seeming fixes were tried, and both were disproven by the real
+MPC backtest rather than assumed to work from the diagnosis alone:
+
+1. **Shorter MPC horizon** (hypothesis: the long-range forecast is too
+   biased to be useful, so a shorter horizon should help). Tested
+   horizon=24 (47.2% of ceiling) and 48 (52.2%) against the original 96
+   (52.3%) — performance is monotonically *better* with more horizon, not
+   worse. A biased long-range forecast is apparently still useful for
+   *timing* (it tells the LP a big move is coming), even if its magnitude
+   is off — losing that lookahead costs more than the bias does.
+
+2. **Quantile regression at the forecaster level** (hypothesis: retrain
+   with a loss that biases toward "don't undershoot" instead of "predict
+   the average," which should directly fix the peak bias). Confirmed
+   empirically that default (L2) LightGBM predicts the conditional mean —
+   this is a basic property of squared-error loss (`argmin_c E[(Y-c)²] =
+   E[Y\|X]`), not a training deficiency: more capacity (127 leaves/400
+   trees vs 31/100) made the peak-hour bias *worse*, ruling out
+   underfitting as the cause. Quantile loss at α=0.85 nearly eliminated
+   the top-decile bias (confirmed via the new `evaluate_forecaster()`
+   bias metrics, below) — but the real MPC backtest with that forecaster
+   scored **$171.84 (45.9% of ceiling)**, worse than the original L2
+   model's $195.65 (52.3%). Fixing the peak came at the cost of a new
+   positive bias almost everywhere else (overestimating ordinary hours,
+   not just correctly estimating the peak), which narrows the perceived
+   cheap-to-charge/expensive-to-discharge spread MPC actually trades on —
+   the fix for the visible problem had a side effect that mattered more
+   than the problem itself.
+
+Both results are genuine, not disappointing footnotes to smooth over:
+they show forecast-accuracy metrics (even carefully chosen ones like
+top-decile bias) don't necessarily predict downstream control-loop
+profit, which is exactly why both were checked against the real MPC
+backtest rather than accepted on the strength of the diagnostic alone.
+
+**New tooling — `evaluate_forecaster()` extended, not replaced.** Adding
+metrics that can distinguish "accurate on average" from "reliable at the
+extremes" without needing an expensive MPC solve to find out:
+
+* `model_bias`/`naive_bias` — mean *signed* error (`pred - actual`),
+  revealing direction, which MAE/RMSE (magnitude-only) cannot.
+* `model_top_decile_bias`/`naive_top_decile_bias` — the same, restricted
+  to rows where the actual price was in the top decile of that fold's
+  realised prices — general enough to find "the peak" wherever and
+  whenever it happens, not tied to GB or ERCOT's specific evening-peak
+  hours the way an hour-of-day cut would be.
+* `model_max_error`/`naive_max_error` — the single largest absolute error
+  seen across every fold's test predictions (pooled, not averaged
+  per-fold). On the real RTM data: model MAE is 4-5x better than naive at
+  every horizon, but model max_error ($1325-1486/MWh) is barely better
+  than naive's ($1489/MWh) at any horizon — the model is much better
+  typically and essentially no better at its single worst moment, which
+  is exactly the moment that matters most for deciding whether to hold
+  battery capacity in reserve.
+* `train_forecaster()`/`evaluate_forecaster()` both gained a
+  `model_kwargs` passthrough to `lgb.LGBMRegressor()`, so a quantile (or
+  any other) objective can be tested through the exact same tooling as
+  the default, without a parallel code path.
+
+All additive — every existing GB-validated behaviour and test is
+unchanged; full suite green throughout.

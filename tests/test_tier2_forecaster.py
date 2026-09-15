@@ -169,5 +169,96 @@ def test_evaluate_forecaster_returns_one_row_per_horizon_with_expected_columns()
     report = evaluate_forecaster(features, horizons=[1, 6], n_splits=3)
 
     assert list(report["horizon"]) == [1, 6]
-    assert set(report.columns) == {"horizon", "model_mae", "model_rmse", "naive_mae", "naive_rmse"}
+    assert set(report.columns) == {
+        "horizon",
+        "model_mae",
+        "model_rmse",
+        "model_max_error",
+        "model_bias",
+        "model_top_decile_bias",
+        "naive_mae",
+        "naive_rmse",
+        "naive_max_error",
+        "naive_bias",
+        "naive_top_decile_bias",
+    }
     assert (report[["model_mae", "model_rmse", "naive_mae", "naive_rmse"]] >= 0).all().all()
+
+
+def test_top_decile_bias_reveals_what_overall_bias_hides():
+    # a case chosen so overall bias and top_decile_bias give genuinely
+    # different answers, hand-computable exactly since naive_forecast is
+    # a deterministic function of lag_1_day, not a trained model: every
+    # period is a flat (period-dependent, but day-independent) baseline
+    # except one "peak" period per day (period 24 of 48, well under the
+    # top-10% threshold at ~2% of rows), which grows by a fixed 0.01/day
+    # and stays far above every baseline value (no exact ties at the
+    # decile boundary, which would otherwise pull flat rows into the
+    # "top decile" mask too). naive (yesterday's same period) is exact on
+    # every flat period (bias=0) and short by exactly 0.01 on every peak
+    # period — so the *overall* bias is tiny (~2% of rows carry it), but
+    # top_decile_bias, isolating just the peak rows, is a full -0.01.
+    # This is the same qualitative pattern the real ERCOT diagnosis found:
+    # an aggregate metric that looks fine while the top of the
+    # distribution is being systematically undercalled.
+    n_days = 16
+    peak_period = 24
+    trend_per_day = 0.01
+
+    def price_fn(i: int) -> float:
+        day_offset, period = divmod(i, 48)
+        period += 1
+        if period == peak_period:
+            return 1.0 + trend_per_day * day_offset
+        return 0.05 + 0.001 * period  # distinct per period, always << the peak's 1.0+
+
+    df = _synthetic_price_history(n_days, price_fn)
+    features = build_features(df)
+
+    report = evaluate_forecaster(features, horizons=[1], n_splits=3)
+    row = report.iloc[0]
+
+    # top_decile_bias should sit meaningfully below zero, driven by the
+    # peak rows (each short by exactly -trend_per_day) — not an exact
+    # -0.01 match, since the "top 10%" mask also pulls in some of the
+    # highest *baseline* values (peak rows alone are only ~2% of the
+    # data, short of the 10% threshold), which carry zero bias of their
+    # own and dilute the average toward zero without changing its sign
+    assert row["naive_top_decile_bias"] < -trend_per_day / 10
+    # the property that actually matters: top_decile_bias reveals a much
+    # bigger problem than the whole-series average does — overall bias is
+    # watered down by the ~98% of rows (every non-peak period) that carry
+    # exactly zero bias
+    assert abs(row["naive_top_decile_bias"]) > abs(row["naive_bias"]) * 5
+
+
+def test_max_error_is_the_single_worst_case_not_an_average_of_per_fold_worsts():
+    # a one-off jump on a single day, everywhere else perfectly flat
+    # (identical every day, so naive is exact — zero error — everywhere
+    # else). naive_forecast (yesterday, same period) gets exactly two
+    # rows wrong: the jump day itself (naive still expects the old flat
+    # value) and the day right after (naive now expects yesterday's
+    # jumped value, but price has returned to flat) — both off by exactly
+    # `jump`, every other one of the ~700 rows off by exactly 0. This
+    # makes max_error and mae maximally distinguishable and both exactly
+    # hand-computable: mae is tiny (2 non-zero rows diluted across
+    # hundreds), max_error is exactly `jump`.
+    n_days = 16
+    jump_day, jump_period = 10, 24
+    jump = 1.0
+
+    def price_fn(i: int) -> float:
+        day_offset, period = divmod(i, 48)
+        period += 1
+        if day_offset == jump_day and period == jump_period:
+            return 0.10 + jump
+        return 0.10
+
+    df = _synthetic_price_history(n_days, price_fn)
+    features = build_features(df)
+
+    report = evaluate_forecaster(features, horizons=[1], n_splits=3)
+    row = report.iloc[0]
+
+    assert row["naive_max_error"] == pytest.approx(jump, abs=1e-9)
+    assert row["naive_mae"] < jump / 100  # diluted across hundreds of exactly-zero-error rows

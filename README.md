@@ -211,6 +211,18 @@ much fatter tails make that gap large enough to fall below naive
 entirely, not just short of the ceiling. Full reasoning:
 [ADR-021](DECISIONS.md#adr-021-ercot-tier-2-part-3--mpc-backtest-and-a-genuine-mpc-loses-to-naive-finding).
 
+**Update:** the mechanism above is now confirmed (hour-of-day error
+inspection shows an accurate horizon-1 peak prediction degrading to a 31%
+undercall by horizon-96), and two plausible fixes were tried and
+disproven by the real MPC backtest — a shorter horizon (worse, not
+better: 47.2%/52.2%/52.3% of ceiling at horizon 24/48/96) and quantile
+regression at α=0.85 (nearly eliminates the peak bias, but scores *worse*
+in MPC — 45.9% of ceiling — by introducing a new positive bias almost
+everywhere else, which narrows the spread MPC actually trades on). Full
+story, plus new `evaluate_forecaster()` bias/max-error metrics built to
+diagnose this without needing an MPC solve each time, in ADR-021's
+2026-09-15 update.
+
 ## Project layout
 
 ```
