@@ -1274,15 +1274,33 @@ forecaster stage used (15 min / 1 h / 3 h / 6 h / 12 h / 24 h):**
 
 Unlike GB's forecaster (ADR-015), which stopped beating naive past
 horizon 12 (6h), this one beats naive at every horizon tested, including
-a full day out. The likely explanation is the DAM-price feature: GB's
+a full day out. The original hypothesis was the DAM-price feature: GB's
 forecaster only had lags/calendar features, which necessarily carry less
 information the further out the target is — but ERCOT's `dam_price_this_hour`
-is known for the *entire next day* at once, so it stays exactly as
-informative at horizon 96 as it is at horizon 1. Not yet proven by
-ablation (i.e. this is the plausible explanation, not yet confirmed by
-re-running without the DAM features) — worth doing before leaning on this
-finding too hard, but a strong signal the DAM-as-feature decision (this
-ADR, above) was the right call.
+is known for the *entire next day* at once, so it might stay exactly as
+informative at horizon 96 as it is at horizon 1.
+
+**Update (2026-09-15) — ablated, and disproven.** Retrained the
+forecaster on `build_features(rtm_df)` (no DAM merge at all) and compared
+against `build_features_with_dam()` across the same horizons, using
+`evaluate_forecaster()`'s MAE/top_decile_bias/max_error (added in
+ADR-021's close-out). The two are essentially identical at every horizon
+(e.g. horizon 96: MAE $22.17 vs $22.16/MWh, top-decile bias -$78.49 vs
+-$73.74) — DAM contributes almost nothing to why this forecaster stays
+accurate at long horizons. The real explanation is still open, but a
+plausible one: DAM prices the day ahead against *forecasted* conditions,
+so the RTM spikes that matter most are disproportionately the ones DAM
+itself didn't see coming — almost by definition, since if DAM had
+anticipated them, DAM's own price would already reflect them and RTM
+wouldn't need to diverge. DAM is least informative exactly when it would
+matter most. A genuinely useful, humbling result to have before deciding
+whether weather data is worth the effort: adding another exogenous,
+known-in-advance series isn't automatically valuable just because it
+sounds relevant — DAM had exactly that property and barely helped.
+Weather is a different kind of signal (a raw causal driver, not a price
+already shaped by the same market dynamics RTM and DAM both reflect), so
+this doesn't rule it out, but it's a real caution against assuming it
+will help without checking.
 
 ## ADR-021: ERCOT Tier 2, part 3 — MPC backtest, and a genuine "MPC loses to naive" finding
 
