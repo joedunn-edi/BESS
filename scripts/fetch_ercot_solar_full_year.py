@@ -79,7 +79,14 @@ while d <= END_DATE:
         _save_day(day_df)
         print(f"  fetched and saved {d}")
         n_fetched += 1
-    except (requests.exceptions.RequestException, ValueError) as exc:
+    except (requests.exceptions.RequestException, ValueError, TypeError, KeyError) as exc:
+        # broader than the usual (RequestException, ValueError) pair used
+        # elsewhere in this project — this report has already produced
+        # one real surprise (a null field crashing with TypeError, fixed
+        # at the source in sources_ercot_solar.py) and a long backfill is
+        # expensive to lose progress on, so a bad day here is isolated
+        # rather than risking another multi-hour rerun over one more
+        # unforeseen data quirk
         warnings.warn(f"day {d} failed: {exc}")
         n_failed += 1
     d += timedelta(days=1)

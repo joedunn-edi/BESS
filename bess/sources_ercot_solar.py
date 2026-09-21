@@ -59,6 +59,15 @@ SOURCE_SOLAR = "ercot_solar_farwest"
 _TIMEOUT_S = 30
 
 
+def _to_float_or_nan(value: float | None) -> float:
+    """ERCOT genuinely returns JSON null for some numeric fields on some
+    hours (confirmed live, 2026-04-02: genFarWest was null) — a real gap
+    in their data, not a malformed response. Reported as NaN, same "don't
+    fabricate a missing value" policy as everywhere else in this project
+    (ADR-008), rather than crashing the whole day over one missing hour."""
+    return float(value) if value is not None else float("nan")
+
+
 def fetch_solar_generation(delivery_date: date, token: ErcotToken, session: requests.Session = requests) -> pd.DataFrame:
     """
     Fetch one day of ERCOT solar generation (actual + two forecast
@@ -112,9 +121,15 @@ def fetch_solar_generation(delivery_date: date, token: ErcotToken, session: requ
             "timestamp_utc": pd.to_datetime([start_utc + timedelta(hours=i) for i in range(n)], utc=True),
             "delivery_date": pd.Series([pd.Timestamp(delivery_date)] * n, dtype="datetime64[ns]"),
             "hour_ending": np.array([int(r["hourEnding"]) for r in ordered], dtype="int64"),
-            "solar_gen_farwest_mw": np.array([float(r["genFarWest"]) for r in ordered], dtype="float64"),
-            "solar_gen_systemwide_mw": np.array([float(r["genSystemWide"]) for r in ordered], dtype="float64"),
-            "solar_stppf_farwest_mw": np.array([float(r["STPPFFarWest"]) for r in ordered], dtype="float64"),
-            "solar_pvgrpp_farwest_mw": np.array([float(r["PVGRPPFarWest"]) for r in ordered], dtype="float64"),
+            "solar_gen_farwest_mw": np.array([_to_float_or_nan(r["genFarWest"]) for r in ordered], dtype="float64"),
+            "solar_gen_systemwide_mw": np.array(
+                [_to_float_or_nan(r["genSystemWide"]) for r in ordered], dtype="float64"
+            ),
+            "solar_stppf_farwest_mw": np.array(
+                [_to_float_or_nan(r["STPPFFarWest"]) for r in ordered], dtype="float64"
+            ),
+            "solar_pvgrpp_farwest_mw": np.array(
+                [_to_float_or_nan(r["PVGRPPFarWest"]) for r in ordered], dtype="float64"
+            ),
         }
     )

@@ -141,3 +141,21 @@ def test_fetch_solar_generation_raises_when_response_is_paginated():
 
 def test_source_solar_constant_is_stable():
     assert SOURCE_SOLAR == "ercot_solar_farwest"
+
+
+def test_fetch_solar_generation_turns_a_null_value_into_nan_not_a_crash():
+    # real, confirmed live (2026-04-02): ERCOT returned JSON null for
+    # genFarWest on at least one hour — must not crash the whole day
+    import math
+
+    records = [_record(h, float(h)) for h in range(1, 25)]
+    records[9]["genFarWest"] = None  # hour_ending 10
+
+    session = _FakeSession(_payload(records))
+    df = fetch_solar_generation(date(2026, 8, 24), token=_token(), session=session)
+
+    assert len(df) == 24
+    null_row = df[df["hour_ending"] == 10].iloc[0]
+    assert math.isnan(null_row["solar_gen_farwest_mw"])
+    # every other column on that same row is unaffected
+    assert null_row["solar_gen_systemwide_mw"] == pytest.approx(100.0)
