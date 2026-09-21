@@ -1440,3 +1440,99 @@ extremes" without needing an expensive MPC solve to find out:
 
 All additive — every existing GB-validated behaviour and test is
 unchanged; full suite green throughout.
+
+## ADR-022: weather-as-a-feature exploration — a ceiling test, and a supply-chain decomposition
+
+**Context.** With the DAM-feature ablation showing no benefit (ADR-020's
+update), the natural next external-data candidate is weather. The user's
+own framing of the live-data constraint mattered: real weather is only
+ever observed with same-day reporting latency, which — for the same
+timing reason DAM turned out not to help — cannot inform a 24h-ahead
+forecast. Rather than debate that in the abstract, the agreed plan was to
+test the ceiling first: does *perfect-foresight* weather carry any signal
+about RTM price at all, decoupled entirely from whether it's realistically
+obtainable in time? Same logic as Tier 1 establishing a ceiling before
+Tier 2 worried about forecasting it.
+
+**`sources_weather.py`** fetches hourly historical weather (temperature,
+wind speed, cloud cover, solar radiation) from Open-Meteo's archive API —
+free, no key needed, confirmed live (2026-09-16) against a real West
+Texas day (plausible values, solar radiation correctly tracking
+daylight hours). `MIDLAND_TX` is a single proxy point for the region
+where most of ERCOT's wind/solar capacity sits — not weighted by real
+generator locations (EIA Form 860 would do that properly; deferred until
+a ceiling test justifies the effort). Deliberately designed to be
+provider-agnostic: any other fetcher that produces the same canonical
+shape (`timestamp_utc` + float columns) can be swapped in without
+touching the merge logic in `features.py`.
+
+**`build_features_with_weather_ceiling()`** merges weather into
+`build_features()`'s output by UTC hour, explicitly documented as a
+ceiling test only — the real, unlagged weather value at the exact hour
+being predicted, not a leakage-safe live feature.
+
+**Ceiling test result — genuinely mixed, not a clean win:**
+
+| Horizon | MAE, no weather → with | Top-decile bias, no weather → with |
+|---|---|---|
+| 1 | $5.28 → $5.18 | -$21.41 → -$18.26 |
+| 24 | $19.94 → **$21.82 (worse)** | -$67.80 → -$62.54 |
+| 48 | $22.06 → $21.80 | -$76.51 → -$62.61 |
+| 96 | $22.17 → $22.11 | -$78.49 → -$68.08 |
+
+Top-decile bias improves consistently at every horizon (8-18% smaller
+undercall) — better than DAM's flat null result. But MAE gets *worse* at
+horizon 24, echoing the exact shape of the quantile-α=0.85 result from
+ADR-021: a metric we specifically chose to track improves, while general
+accuracy doesn't uniformly follow. Given that quantile result later
+scored *worse* in a real MPC backtest despite the promising proxy metric,
+this ceiling-test result was explicitly **not** trusted at face value —
+it justifies looking harder, not concluding weather works.
+
+**The decomposition, proposed by the user, adopted as the next step.**
+Rather than one model learning the long, noisy chain from raw weather
+straight to price, split it into two independently checkable stages:
+
+    weather → solar generation → price
+
+with demand-side forecasting (temperature → AC load → price) explicitly
+parked as a separate, harder problem for later. Stage A (does our
+weather proxy predict actual ERCOT solar generation?) and Stage B (does
+generation itself predict price the way the duck curve suggests?) let us
+diagnose *where* a weak link is, rather than getting one murky end-to-end
+number. A single, arbitrary, unweighted weather point is a much more
+likely explanation for a muddy Stage A than "weather doesn't matter" —
+this decomposition is what would actually reveal that, where the
+one-shot ceiling test above cannot.
+
+**`sources_ercot_solar.py`** fetches ERCOT's own solar generation report
+(NP4-745-CD) — actual generation plus two of ERCOT's own forecast
+horizons (`STPPF`, `PVGRPP`), for FarWest (confirmed ~84% of system-wide
+solar generation in a real sample — the right region to pair with the
+Midland weather proxy) and system-wide. A real, load-bearing wrinkle
+found before writing any fetch code: this report reposts roughly hourly,
+each time restating a rolling ~48-52 hour window of recent delivery
+hours whether or not anything changed (confirmed live: the same hour's
+value was byte-identical across three consecutive hourly reposts) — a
+naive fetch of a date range returns not one row per hour but on the
+order of 200+ near-duplicate postings per hour. Querying with
+`postedDatetime` set to `[delivery_date+1, delivery_date+2]` reliably
+catches every hour of a day at least once while still inside that
+retention window — confirmed live to return exactly 576 rows for one day
+(24 hourly postings × 24 identical hours), deduplicated in code to the
+real 24. A real bug caught by a test before it shipped: the first
+dedup implementation keyed on `hourEnding` alone, which silently
+collapsed the US autumn clock-change day's genuinely-repeated hour
+(same `hourEnding`, different `DSTFlag`) into a single row — fixed by
+keying on `(hourEnding, DSTFlag)` together, the same tie-break already
+used for DAM/RTM.
+
+Also worth noting for later: this same report carries ERCOT's *own*
+solar forecast (`STPPF`/`PVGRPP`), published in advance of delivery —
+unlike raw live weather, that's potentially a genuinely leakage-safe,
+long-horizon-useful feature in its own right, independent of whether the
+weather angle pans out. Not yet evaluated.
+
+**Not yet done:** the actual Stage A/B analysis (this ADR covers the
+fetcher infrastructure and the ceiling test only) — pending a real pilot
+fetch and a full historical backfill of the solar report.

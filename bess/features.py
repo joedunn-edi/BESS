@@ -137,3 +137,38 @@ def build_features_with_dam(rtm_df: pd.DataFrame, dam_df: pd.DataFrame, tz: Zone
     features["rtm_minus_dam_lag_1"] = features["lag_1"] - features["dam_price_this_hour"]
 
     return features.dropna().reset_index(drop=True)
+
+
+def build_features_with_weather_ceiling(rtm_df: pd.DataFrame, weather_df: pd.DataFrame, tz: ZoneInfo = LONDON) -> pd.DataFrame:
+    """
+    build_features() for ERCOT RTM, plus PERFECT-FORESIGHT weather features
+    (temperature/wind/cloud-cover/solar-radiation columns from
+    sources_weather.py) — the actual, real weather during the exact hour
+    each RTM period falls in, not a live, latency-delayed observation.
+
+    This is a CEILING TEST ONLY: "if weather were known with certainty,
+    would it carry any signal about RTM prices at all?" It is deliberately
+    NOT leakage-safe for real trading — in reality you only ever observe
+    weather with reporting latency, never the true value at the instant a
+    trading decision needs it (see sources_weather.py's module docstring).
+    Do not use this function's output to claim a realistic trading result;
+    it exists to decide whether the harder, latency-realistic version is
+    worth building at all.
+
+    A period whose hour has no matching weather row is dropped, same
+    "don't invent it" policy as a missing lag or DAM match.
+
+    tz must match rtm_df's actual market (pass tz=CHICAGO for real ERCOT
+    data) — see build_features()'s docstring for why.
+    """
+    features = build_features(rtm_df, tz=tz)
+
+    weather_by_hour = weather_df.set_index("timestamp_utc")
+    weather_columns = [c for c in weather_df.columns if c != "timestamp_utc"]
+
+    hour = features["timestamp_utc"].dt.floor("h")
+    matched = weather_by_hour.reindex(hour)
+    for col in weather_columns:
+        features[col] = matched[col].to_numpy()
+
+    return features.dropna().reset_index(drop=True)

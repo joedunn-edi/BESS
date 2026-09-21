@@ -15,7 +15,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from bess.features import LAG_PERIODS, build_features, build_features_with_dam, longest_lookback_periods
+from bess.features import (
+    LAG_PERIODS,
+    build_features,
+    build_features_with_dam,
+    build_features_with_weather_ceiling,
+    longest_lookback_periods,
+)
 from bess.sources_ercot import CHICAGO
 
 ROLLING_WINDOW = 48  # GB default: 24h at 30-min periods, matches build_features()'s own periods_per_day
@@ -368,3 +374,61 @@ def test_build_features_uses_the_given_tz_across_a_real_us_dst_transition():
     df = validate(df, tz=CHICAGO)
 
     build_features(df, tz=CHICAGO)  # must not raise
+
+
+# --- build_features_with_weather_ceiling ---------------------------------------------
+
+
+def _synthetic_hourly_weather(n_days: int, value_fn) -> pd.DataFrame:
+    """One row per UTC hour, value_fn(hour_index) gives that hour's value
+    for every weather column (kept identical across columns for a simple,
+    hand-checkable test — real data has different values per column, but
+    the merge logic doesn't care). Uses the same (default LONDON) tz as
+    _synthetic_15min_price_history()'s own start_utc, so the two line up —
+    harmless in January (no DST edge), but the two must agree with each
+    other regardless."""
+    start_date = date(2026, 1, 1)
+    start_utc, _ = settlement_day_utc_bounds(start_date)
+    n_hours = n_days * 24
+    timestamps = [start_utc + timedelta(hours=h) for h in range(n_hours)]
+    values = [value_fn(h) for h in range(n_hours)]
+    return pd.DataFrame(
+        {
+            "timestamp_utc": pd.to_datetime(timestamps, utc=True),
+            "temperature_c": values,
+            "wind_speed_kmh": values,
+            "cloud_cover_pct": values,
+            "shortwave_radiation_wm2": values,
+        }
+    )
+
+
+def test_build_features_with_weather_ceiling_merges_the_correct_hour():
+    n_days = 10
+    rtm_df = _synthetic_15min_price_history(n_days, lambda i: 1.0)
+    weather_df = _synthetic_hourly_weather(n_days, lambda h: float(h))
+
+    features = build_features_with_weather_ceiling(rtm_df, weather_df, tz=CHICAGO)
+
+    # every RTM period within a given UTC hour must get that hour's value —
+    # hand-verified against the weather frame's own hour index, not assumed
+    weather_by_hour = weather_df.set_index("timestamp_utc")["temperature_c"]
+    for _, row in features.iterrows():
+        expected = weather_by_hour[row["timestamp_utc"].floor("h")]
+        assert row["temperature_c"] == pytest.approx(expected)
+        assert row["wind_speed_kmh"] == pytest.approx(expected)
+        assert row["cloud_cover_pct"] == pytest.approx(expected)
+        assert row["shortwave_radiation_wm2"] == pytest.approx(expected)
+
+
+def test_build_features_with_weather_ceiling_drops_rows_with_no_matching_weather():
+    n_days = 10
+    rtm_df = _synthetic_15min_price_history(n_days, lambda i: 1.0)
+    # weather only for the first 9 of the 10 days — day 10 has no match at all
+    weather_df = _synthetic_hourly_weather(n_days - 1, lambda h: 20.0)
+
+    features = build_features_with_weather_ceiling(rtm_df, weather_df, tz=CHICAGO)
+
+    assert not features.isna().any().any()
+    last_day = date(2026, 1, 1) + timedelta(days=n_days - 1)
+    assert (features["timestamp_utc"].dt.date < last_day).all()
