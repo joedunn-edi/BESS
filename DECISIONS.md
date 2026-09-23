@@ -1536,3 +1536,65 @@ weather angle pans out. Not yet evaluated.
 **Not yet done:** the actual Stage A/B analysis (this ADR covers the
 fetcher infrastructure and the ceiling test only) — pending a real pilot
 fetch and a full historical backfill of the solar report.
+
+**Update (2026-09-23) — full solar backfill, Stage A/B run, and a pivot
+to wind.**
+
+The full-year solar backfill (`scripts/fetch_ercot_solar_full_year.py`)
+crashed once for real, on 2026-04-02: ERCOT returned JSON `null` for
+`genFarWest` on one hour, and the script's only-save-at-the-end design
+lost ~207 already-fetched days when it died. Fixed twice: the fetcher now
+turns a null field into `NaN` for that hour rather than crashing
+(`_to_float_or_nan()`, same "report gaps, don't fabricate" policy as
+ADR-008), and the backfill script now saves after every successful day
+and skips whatever's already cached on startup — verified with a
+synthetic crash-and-resume dry run before trusting it with another real
+~20-minute run. Final cache: 364/364 days, 8735/8736 rows (the one
+confirmed-real null preserved as NaN, not dropped or fabricated).
+
+**Stage 1 result — solar generation vs RTM price, real data:** Pearson
+correlation is weak (-0.15 FarWest, -0.20 system-wide), but that
+understates a real relationship — binning price by generation decile
+shows a genuine ~2x swing (~$18/MWh at the generation "belly" vs ~$40/MWh
+at low generation). The honest single-number version of this (eta-squared,
+i.e. how much of *total* price variance is explained by which generation
+decile a row falls in) is only ~3% — because ERCOT's price distribution
+is dominated by rare extreme spikes (recall the kurtosis-357 finding from
+the GB/ERCOT comparison), and solar's effect is concentrated in shaping
+the *typical* day, not those spikes.
+
+Checked whether solar is specifically low during the events that matter
+most — the top 5% of realised prices. It is (mean generation during those
+events is 584 MW vs 1420 MW overall) — but this turned out to be a
+time-of-day artefact, not evidence solar *variability* drives spikes:
+the top-5% price events cluster overwhelmingly at UTC hours 22-4 (~5pm-
+11pm CDT), after solar has already set for the day on *every* day, spike
+or not. Solar being near-zero during an evening spike says nothing new;
+it's zero every evening regardless.
+
+**Conclusion: solar shapes the routine midday trough, but doesn't look
+like the driver of the extreme evening spikes that matter most for
+arbitrage profit** — the same events ADR-021 traced back to the model's
+peak-hour undercall. Texas's evening price peak is a well-documented
+wind-ramp-down-meets-demand-ramp-up story, so wind generation is the more
+promising next candidate specifically for that problem, rather than
+digging further into solar.
+
+**`sources_ercot_wind.py`** fetches ERCOT's wind equivalent (NP4-742-CD,
+`wpp_hrly_actual_fcast_geo`) — structurally identical to the solar report
+(confirmed live: an identical query shape returned exactly 576 rows for
+one day, the same repost/retention pattern), with `STWPF`/`WGRPP` as
+wind's forecast fields, confirmed to parallel solar's `STPPF`/`PVGRPP`
+naming exactly. Region confirmed from real data rather than assumed: the
+five named regions (Panhandle, Coastal, South, West, North) sum exactly
+to `genSystemWide` in a live sample, and `West` alone is ~62% of total —
+the McCamey/Sweetwater wind corridor, ERCOT's largest single wind region,
+and *not* the same region as solar's `FarWest` (the two reports use
+different geographic taxonomies). Kept as a separate module mirroring
+`sources_ercot_solar.py`'s structure, rather than factored into a shared
+abstraction — matches this project's existing precedent
+(`sources_ercot.py`'s parallel, not-unified, DAM/RTM fetchers) for two
+call sites this similar. `scripts/fetch_ercot_wind_full_year.py` mirrors
+the (already crash-hardened) solar backfill script exactly.
+
+**Not yet done:** the wind backfill and its own Stage 1/2 analysis.
