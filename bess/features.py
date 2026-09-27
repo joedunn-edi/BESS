@@ -172,3 +172,38 @@ def build_features_with_weather_ceiling(rtm_df: pd.DataFrame, weather_df: pd.Dat
         features[col] = matched[col].to_numpy()
 
     return features.dropna().reset_index(drop=True)
+
+
+def build_features_with_wind(rtm_df: pd.DataFrame, wind_forecast_df: pd.DataFrame, tz: ZoneInfo = LONDON) -> pd.DataFrame:
+    """
+    build_features() for ERCOT RTM, plus the genuinely leakage-safe
+    48h-ahead wind forecast (WGRPP, West) as an exogenous feature.
+
+    Unlike build_features_with_weather_ceiling(), this one IS safe to use
+    as a real trading feature: `wind_forecast_df` must come from
+    sources_ercot_wind.fetch_wind_forecast_snapshot(), confirmed
+    (DECISIONS.md's ADR-022) to be published at least 48h ahead of
+    delivery — not fetch_wind_generation()'s post-delivery forecast
+    columns, which may reflect a later, closer-to-delivery revision.
+
+    Deliberately WGRPP only, not also STWPF: confirmed (ADR-022) WGRPP is
+    dramatically more accurate specifically in low-wind hours — the
+    regime Stage 1 tied to RTM's price spikes — while STWPF badly
+    overpredicts available wind during a genuine lull. That's a real P50
+    (median) vs P80 (deliberately conservative) distinction in what each
+    forecast is built to represent, not noise, so there's no reason to
+    also include the one already shown to be worse for this purpose.
+
+    A period whose hour has no matching wind-forecast row is dropped,
+    same "don't invent it" policy as a missing lag or DAM match.
+
+    tz must match rtm_df's actual market (pass tz=CHICAGO for real ERCOT
+    data) — see build_features()'s docstring for why.
+    """
+    features = build_features(rtm_df, tz=tz)
+
+    wind_by_hour = wind_forecast_df.set_index("timestamp_utc")["wind_wgrpp_west_mw"]
+    hour = features["timestamp_utc"].dt.floor("h")
+    features["wind_wgrpp_west_mw"] = wind_by_hour.reindex(hour).to_numpy()
+
+    return features.dropna().reset_index(drop=True)

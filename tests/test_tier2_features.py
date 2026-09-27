@@ -20,6 +20,7 @@ from bess.features import (
     build_features,
     build_features_with_dam,
     build_features_with_weather_ceiling,
+    build_features_with_wind,
     longest_lookback_periods,
 )
 from bess.sources_ercot import CHICAGO
@@ -428,6 +429,65 @@ def test_build_features_with_weather_ceiling_drops_rows_with_no_matching_weather
     weather_df = _synthetic_hourly_weather(n_days - 1, lambda h: 20.0)
 
     features = build_features_with_weather_ceiling(rtm_df, weather_df, tz=CHICAGO)
+
+    assert not features.isna().any().any()
+    last_day = date(2026, 1, 1) + timedelta(days=n_days - 1)
+    assert (features["timestamp_utc"].dt.date < last_day).all()
+
+
+# --- build_features_with_wind ---------------------------------------------------------
+
+
+def _synthetic_hourly_wind_forecast(n_days: int, value_fn) -> pd.DataFrame:
+    """One row per UTC hour — same shape/tz convention as
+    _synthetic_hourly_weather(), but matching fetch_wind_forecast_snapshot()'s
+    real output columns (timestamp_utc, wind_stwpf_west_mw, wind_wgrpp_west_mw)."""
+    start_date = date(2026, 1, 1)
+    start_utc, _ = settlement_day_utc_bounds(start_date)
+    n_hours = n_days * 24
+    timestamps = [start_utc + timedelta(hours=h) for h in range(n_hours)]
+    values = [value_fn(h) for h in range(n_hours)]
+    return pd.DataFrame(
+        {
+            "timestamp_utc": pd.to_datetime(timestamps, utc=True),
+            "wind_stwpf_west_mw": values,
+            "wind_wgrpp_west_mw": values,
+        }
+    )
+
+
+def test_build_features_with_wind_merges_the_correct_hour():
+    n_days = 10
+    rtm_df = _synthetic_15min_price_history(n_days, lambda i: 1.0)
+    wind_df = _synthetic_hourly_wind_forecast(n_days, lambda h: float(h))
+
+    features = build_features_with_wind(rtm_df, wind_df, tz=CHICAGO)
+
+    wind_by_hour = wind_df.set_index("timestamp_utc")["wind_wgrpp_west_mw"]
+    for _, row in features.iterrows():
+        expected = wind_by_hour[row["timestamp_utc"].floor("h")]
+        assert row["wind_wgrpp_west_mw"] == pytest.approx(expected)
+
+
+def test_build_features_with_wind_does_not_include_stwpf():
+    # deliberate: STWPF is confirmed worse for this purpose (ADR-022) —
+    # it shouldn't sneak in as a feature just because it's in the source frame
+    n_days = 10
+    rtm_df = _synthetic_15min_price_history(n_days, lambda i: 1.0)
+    wind_df = _synthetic_hourly_wind_forecast(n_days, lambda h: float(h))
+
+    features = build_features_with_wind(rtm_df, wind_df, tz=CHICAGO)
+
+    assert "wind_stwpf_west_mw" not in features.columns
+    assert "wind_wgrpp_west_mw" in features.columns
+
+
+def test_build_features_with_wind_drops_rows_with_no_matching_forecast():
+    n_days = 10
+    rtm_df = _synthetic_15min_price_history(n_days, lambda i: 1.0)
+    wind_df = _synthetic_hourly_wind_forecast(n_days - 1, lambda h: 5000.0)
+
+    features = build_features_with_wind(rtm_df, wind_df, tz=CHICAGO)
 
     assert not features.isna().any().any()
     last_day = date(2026, 1, 1) + timedelta(days=n_days - 1)
