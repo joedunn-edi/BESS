@@ -14,9 +14,10 @@ from datetime import date
 import pytest
 
 from bess.sources_ercot import ErcotToken
-from bess.sources_ercot_wind import SOURCE_WIND, fetch_wind_generation
+from bess.sources_ercot_wind import SOURCE_WIND, fetch_wind_forecast_snapshot, fetch_wind_generation
 
 FIELDS = [
+    "postedDatetime",
     "deliveryDate",
     "hourEnding",
     "genWest",
@@ -55,8 +56,15 @@ class _FakeSession:
         return _FakeResponse(self._payload)
 
 
-def _record(hour: int, gen: float, delivery_date: str = "2026-08-24", dst: bool = False) -> dict:
+def _record(
+    hour: int,
+    gen: float,
+    delivery_date: str = "2026-08-24",
+    dst: bool = False,
+    posted: str = "2026-08-25T12:00:00",
+) -> dict:
     return {
+        "postedDatetime": posted,
         "deliveryDate": delivery_date,
         "hourEnding": hour,
         "genWest": gen,
@@ -151,3 +159,50 @@ def test_fetch_wind_generation_turns_a_null_value_into_nan_not_a_crash():
     null_row = df[df["hour_ending"] == 10].iloc[0]
     assert math.isnan(null_row["wind_gen_west_mw"])
     assert null_row["wind_gen_systemwide_mw"] == pytest.approx(100.0)
+
+
+# --- fetch_wind_forecast_snapshot ----------------------------------------------------
+
+
+def test_fetch_wind_forecast_snapshot_sends_a_window_lead_days_before_delivery():
+    records = [_record(h, float(h)) for h in range(1, 25)]
+    session = _FakeSession(_payload(records))
+    fetch_wind_forecast_snapshot(date(2026, 8, 24), lead_days=2, token=_token(), session=session)
+
+    assert session.captured_params["deliveryDateFrom"] == "2026-08-24"
+    assert session.captured_params["deliveryDateTo"] == "2026-08-24"
+    assert session.captured_params["postedDatetimeFrom"] == "2026-08-22"
+    assert session.captured_params["postedDatetimeTo"] == "2026-08-23"
+
+
+def test_fetch_wind_forecast_snapshot_keeps_the_earliest_posting_not_the_latest():
+    # the real, load-bearing behaviour: unlike fetch_wind_generation()
+    # (where reposted values are identical, so any one is fine),
+    # a forecast genuinely changes between postings — this must pick the
+    # EARLIEST one in the window (closest to the true lead_days-ahead
+    # value), not whichever the API happens to return first (its own
+    # default sort is postedDatetime DESC, i.e. latest first)
+    early = _record(5, 100.0, posted="2026-08-22T01:00:00")
+    late = _record(5, 999.0, posted="2026-08-22T23:00:00")  # a later, revised posting
+    # API's own default order: latest first
+    records = [late, early] + [_record(h, float(h), posted="2026-08-22T12:00:00") for h in range(1, 25) if h != 5]
+
+    session = _FakeSession(_payload(records))
+    df = fetch_wind_forecast_snapshot(date(2026, 8, 24), lead_days=2, token=_token(), session=session)
+
+    hour5 = df[df["hour_ending"] == 5].iloc[0]
+    assert hour5["wind_stwpf_west_mw"] == pytest.approx(101.0)  # from `early` (100.0 + 1.0), not `late`
+
+
+def test_fetch_wind_forecast_snapshot_has_no_actual_generation_columns():
+    records = [_record(h, float(h)) for h in range(1, 25)]
+    session = _FakeSession(_payload(records))
+    df = fetch_wind_forecast_snapshot(date(2026, 8, 24), lead_days=2, token=_token(), session=session)
+
+    assert set(df.columns) == {"timestamp_utc", "delivery_date", "hour_ending", "wind_stwpf_west_mw", "wind_wgrpp_west_mw"}
+
+
+def test_fetch_wind_forecast_snapshot_raises_on_empty_response():
+    session = _FakeSession(_payload([]))
+    with pytest.raises(ValueError, match="no forecast records returned"):
+        fetch_wind_forecast_snapshot(date(2026, 8, 24), lead_days=2, token=_token(), session=session)

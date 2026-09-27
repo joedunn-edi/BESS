@@ -29,12 +29,24 @@ Responsible for:
       genSystemWide exactly, and West alone is ~62% of system-wide
       generation in a real sample — the McCamey/Sweetwater wind corridor,
       the single largest of ERCOT's five wind regions) and system-wide.
+    * fetch_wind_forecast_snapshot(): the forecast (STWPF, WGRPP) ONLY,
+      as it stood at a specific lead time before delivery — confirmed
+      live (2026-09-24): querying for a delivery day 2 days ahead of
+      "now" already returns real, non-null STWPF/WGRPP (while genWest/
+      genSystemWide were null, since that day hadn't happened yet),
+      proving these are genuine forecasts published at least 48h ahead,
+      not live observations. This is the leakage-safe one — the value a
+      real trading decision would actually have had in hand at that lead
+      time — unlike fetch_wind_generation()'s forecast columns, which are
+      deliberately fetched AFTER delivery (for the most accurate actual-
+      generation reading) and so may reflect a later, closer-to-delivery
+      revision of the forecast, not what was truly known in advance.
 
 Deliberately NOT responsible for:
     * the other four named regions (Panhandle, Coastal, South, North) or
       COPHSL — same reasoning as sources_ercot_solar.py
-    * any leakage-safety modelling for STWPFWest/WGRPPWest as live trading
-      features — same ceiling-test-only caveat as solar's forecast fields
+    * fetch_wind_generation()'s STWPF/WGRPP columns being leakage-safe —
+      see fetch_wind_forecast_snapshot() above for the one that is
 """
 
 from __future__ import annotations
@@ -115,6 +127,75 @@ def fetch_wind_generation(delivery_date: date, token: ErcotToken, session: reque
             "wind_gen_systemwide_mw": np.array(
                 [_to_float_or_nan(r["genSystemWide"]) for r in ordered], dtype="float64"
             ),
+            "wind_stwpf_west_mw": np.array([_to_float_or_nan(r["STWPFWest"]) for r in ordered], dtype="float64"),
+            "wind_wgrpp_west_mw": np.array([_to_float_or_nan(r["WGRPPWest"]) for r in ordered], dtype="float64"),
+        }
+    )
+
+
+def fetch_wind_forecast_snapshot(
+    delivery_date: date, lead_days: int, token: ErcotToken, session: requests.Session = requests
+) -> pd.DataFrame:
+    """
+    Fetch the West wind FORECAST (STWPF, WGRPP) for one delivery day, as
+    it stood at the EARLIEST posting within a one-day window starting
+    `lead_days` before delivery — i.e. as close as this window allows to
+    the forecast a real trading decision `lead_days` ahead would actually
+    have had in hand. See the module docstring for why this differs from
+    fetch_wind_generation()'s forecast columns (which are fetched after
+    delivery and may reflect a later revision, not what was truly known
+    in advance).
+
+    No actual-generation columns here at all — that's fetch_wind_
+    generation()'s job; this function is deliberately forecast-only.
+    """
+    posted_from = delivery_date - timedelta(days=lead_days)
+    posted_to = posted_from + timedelta(days=1)
+    response = session.get(
+        BASE_URL + WIND_PRODUCT_PATH,
+        headers=_auth_headers(token),
+        params={
+            "deliveryDateFrom": delivery_date.isoformat(),
+            "deliveryDateTo": delivery_date.isoformat(),
+            "postedDatetimeFrom": posted_from.isoformat(),
+            "postedDatetimeTo": posted_to.isoformat(),
+        },
+        timeout=_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    total_pages = payload.get("_meta", {}).get("totalPages", 1)
+    if total_pages > 1:
+        raise ValueError(
+            f"{SOURCE_WIND}: forecast snapshot for {delivery_date} (lead_days={lead_days}) came back "
+            f"paginated ({total_pages} pages) — the postedDatetime window may need narrowing"
+        )
+
+    records = _rows_as_dicts(payload)
+    if not records:
+        raise ValueError(f"{SOURCE_WIND}: no forecast records returned for {delivery_date} at lead_days={lead_days}")
+
+    # earliest posting wins — the forecast is genuinely revised over
+    # time (unlike fetch_wind_generation()'s actual-generation value,
+    # which is stable across reposts), so we deliberately want the
+    # earliest snapshot in the window, not whichever happens to be
+    # returned first (the API's own default sort is postedDatetime DESC —
+    # latest first — so this must be sorted explicitly, not just deduped
+    # in response order the way fetch_wind_generation() safely can be)
+    records_by_posted_asc = sorted(records, key=lambda r: r["postedDatetime"])
+    by_hour: dict[tuple[int, bool], dict] = {}
+    for r in records_by_posted_asc:
+        by_hour.setdefault((int(r["hourEnding"]), bool(r.get("DSTFlag", False))), r)
+
+    ordered = sorted(by_hour.values(), key=lambda r: (int(r["hourEnding"]), bool(r.get("DSTFlag", False))))
+    start_utc, _ = settlement_day_utc_bounds(delivery_date, tz=CHICAGO)
+    n = len(ordered)
+
+    return pd.DataFrame(
+        {
+            "timestamp_utc": pd.to_datetime([start_utc + timedelta(hours=i) for i in range(n)], utc=True),
+            "delivery_date": pd.Series([pd.Timestamp(delivery_date)] * n, dtype="datetime64[ns]"),
+            "hour_ending": np.array([int(r["hourEnding"]) for r in ordered], dtype="int64"),
             "wind_stwpf_west_mw": np.array([_to_float_or_nan(r["STWPFWest"]) for r in ordered], dtype="float64"),
             "wind_wgrpp_west_mw": np.array([_to_float_or_nan(r["WGRPPWest"]) for r in ordered], dtype="float64"),
         }
