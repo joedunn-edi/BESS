@@ -1597,4 +1597,81 @@ abstraction — matches this project's existing precedent
 call sites this similar. `scripts/fetch_ercot_wind_full_year.py` mirrors
 the (already crash-hardened) solar backfill script exactly.
 
-**Not yet done:** the wind backfill and its own Stage 1/2 analysis.
+**Update (2026-09-24 to 2026-09-27) — wind Stage 1/2, and why the
+post-delivery vintage was misleading.**
+
+**Stage 1 — wind vs RTM price, full real year:** a much cleaner result
+than solar. Pearson correlation -0.33 (West), roughly double solar's
+-0.15. The decile table is close to monotonic (price falls smoothly from
+$57.86/MWh at the lowest wind decile to $7.87/MWh at the highest), and
+eta-squared (10.9%) and Pearson r² (10.7%) are nearly identical — the
+relationship really is close to linear, unlike solar's non-monotonic
+U-shape. Makes physical sense: wind blows at all hours, so — unlike
+solar, which is structurally zero exactly during the evening spike
+hours — wind's variability can actually matter during the hours that
+drive most of the arbitrage opportunity. Checked this directly, properly
+controlled this time (solar's mistake was comparing spike-hour generation
+to an overall daily average, conflating a trivial diurnal pattern with a
+real signal): for each of the 6 most spike-prone hours, wind generation
+during that hour's price spikes runs at 32-46% of that *same hour's* own
+typical level (e.g. hour 3: 3177 MW during spikes vs 9946 MW typically) —
+a real, hour-of-day-controlled wind-lull-during-spikes signal, not an
+artefact.
+
+**Stage 2, first pass — misleading.** Evaluated STWPF/WGRPP against
+actual generation using the already-cached `fetch_wind_generation()` data
+(fetched with `postedDatetime` set to *after* delivery, chosen for the
+most accurate actual-generation reading). Found STWPF accurate and
+unbiased in low-wind hours (MAE 168 MW, bias +26 MW) and WGRPP biased
+high there (MAE 274 MW, bias -270 MW) — a seemingly clean case for STWPF.
+
+**This is why fetch_wind_forecast_snapshot() (ADR-022, above) was worth
+building rather than trusting that result.** `fetch_wind_generation()`'s
+forecast columns are fetched from the *same* post-delivery posting used
+to get the settled actual value — meaning the forecast value obtained
+this way may itself be a later, closer-to-delivery revision, not what a
+trader 48h out would genuinely have seen. Confirmed live first with a
+3-day pilot (2026-08-24 to 26): on 2026-08-26, a real, dramatic wind lull
+neither forecast predicted well in magnitude, but WGRPP tracked the
+collapse far more closely than STWPF at the true 48h vintage — the
+*opposite* of the post-delivery-based conclusion. Backfilled the full
+year at the correct vintage (`data/ercot_wind_forecast_48h.parquet`,
+364/364 days) to confirm this wasn't a 3-day fluke:
+
+| | STWPF (48h-ahead) | WGRPP (48h-ahead) |
+|---|---|---|
+| Overall MAE | 1564 MW (~19.8%) | 1643 MW (~20.8%) |
+| Overall bias | +559 MW | -840 MW |
+| MAE, low-wind hours (bottom quartile) | 1326 MW | **908 MW** |
+| Bias, low-wind hours | **+1093 MW** | **+33 MW** |
+
+Confirmed: at the genuine 48h lead time, both forecasts are meaningfully
+less accurate than the post-delivery numbers suggested (MAE ~20% of
+typical vs ~5-7%) — the vintage really did matter. And in low-wind hours
+specifically — the regime that drives the spikes Stage 1 just tied to
+wind — **WGRPP is dramatically more accurate and nearly unbiased, while
+STWPF badly overpredicts available wind during a real lull.** The
+opposite of the first-pass conclusion.
+
+**Why, confirmed against ERCOT's own published methodology (not just
+inferred from field names):** STWPF is a P50 forecast (actual production
+expected to exceed it 50% of the time — a median/"typical" estimate).
+WGRPP is a P80 forecast (expected to exceed it 80% of the time —
+deliberately conservative/low-side, built for grid-reliability planning:
+"how much wind can be safely counted on," not "what will most likely
+happen"). A median estimate will structurally look too optimistic during
+any genuine low-tail event, by construction — precisely the same failure
+mode the price forecaster itself had under squared-error loss (ADR-021).
+WGRPP's built-in conservatism is the *same asymmetric-quantile reasoning*
+this project applied to its own price forecaster (the quantile_alpha
+experiments in ADR-021), mirrored in the opposite direction — not a
+coincidence, the same statistical tool serving two different asymmetric-
+cost decisions. Source: https://www.ercot.com/mp/data-products/data-product-details?id=NP4-732-CD
+
+**Conclusion: WGRPP, not STWPF, is the wind feature worth building into
+the real RTM forecaster** — genuinely leakage-safe (confirmed ≥48h lead
+time), genuinely correlated with price (Stage 1), and genuinely accurate
+in exactly the regime that matters (Stage 2, correct vintage).
+
+**Not yet done:** merging `wind_wgrpp_west_mw` into the RTM feature set
+and running it through the real forecaster evaluation.

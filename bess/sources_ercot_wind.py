@@ -20,7 +20,24 @@ abstraction for two call sites.
 
 `WGRPP`/`STWPF` are wind's forecast fields, confirmed live to parallel
 solar's `PVGRPP`/`STPPF` naming exactly (Wind/Short-Term Wind Generation
-Resource Power Potential vs Photovoltaic equivalents).
+Resource Power Potential vs Photovoltaic equivalents). Confirmed against
+ERCOT's own published methodology (2026-09-27, not just inferred from
+field names): both are published for the next 48 hours, but at different
+quantiles of ERCOT's probabilistic wind forecast — STWPF is a P50
+forecast (actual production expected to exceed it 50% of the time, a
+median/"typical" estimate), WGRPP is a P80 forecast (expected to exceed
+it 80% of the time — deliberately conservative/low-side, built for grid-
+reliability planning: "how much wind can be safely counted on," not
+"what will most likely happen"). This directly explains a real finding
+in DECISIONS.md's ADR-022: WGRPP tracked actual generation far more
+accurately than STWPF specifically during genuine wind lulls, at the
+correct 48h-ahead vintage — the same asymmetric-quantile reasoning this
+project applied to its own price forecaster (the quantile_alpha
+experiments in ADR-021), mirrored in the opposite direction (ERCOT's P80
+avoids overestimating available wind; this project's high-alpha
+experiments avoided underestimating price peaks) — not a coincidence,
+the same statistical tool applied to two different asymmetric-cost
+decisions. Source: https://www.ercot.com/mp/data-products/data-product-details?id=NP4-732-CD
 
 Responsible for:
     * fetch_wind_generation(): one day of actual + ERCOT's own two
