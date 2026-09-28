@@ -1673,5 +1673,56 @@ the real RTM forecaster** — genuinely leakage-safe (confirmed ≥48h lead
 time), genuinely correlated with price (Stage 1), and genuinely accurate
 in exactly the regime that matters (Stage 2, correct vintage).
 
-**Not yet done:** merging `wind_wgrpp_west_mw` into the RTM feature set
-and running it through the real forecaster evaluation.
+**Update (2026-09-28) — built, evaluated, and it made MPC worse. A third
+instance of the same lesson.**
+
+`build_features_with_wind()` merges `wind_wgrpp_west_mw` into the RTM
+feature set by hour (deliberately WGRPP only, not STWPF, per the finding
+above). The 5-fold CV accuracy check (`evaluate_forecaster()`) showed
+essentially no change — MAE/top-decile-bias/max-error all moved by
+amounts indistinguishable from noise across horizons 1/24/48/96, despite
+WGRPP correlating only weakly with the model's existing lag features
+(confirming it isn't simply redundant).
+
+Investigated why a real, non-redundant, moderately-important feature
+(gain-based importance ~42, meaningfully sized though well below `lag_1`/
+`rolling_mean_96`) produces essentially zero net accuracy change: adding
+it genuinely changes individual predictions (mean absolute shift $3.95/
+MWh, correlation between the two models' predictions only 0.906 — not
+"using it for show"), so the lack of aggregate movement means it helps
+some rows and hurts others by similar amounts, netting to ~zero.
+
+On the SPECIFIC single 80/20 chronological split `run_tier2_comparison()`
+actually uses (as opposed to the 5-fold CV average), horizon 24 showed a
+real, consistent improvement in BOTH the top-decile-price and bottom-90%
+regimes (MAE improved ~3.7% and ~5.4% respectively) — encouraging enough
+to justify running the real MPC backtest rather than stopping at the
+proxy, the same "verify before trusting a promising metric" discipline
+this project has applied throughout.
+
+**The real MPC backtest disagreed: $172.79 (46.2% of ceiling) with wind,
+vs $195.65 (52.3%) without — worse, not better**, on the identical
+train/test split and battery. A real gap in the diagnostic that ran
+before this: only horizon 24 was checked for the accuracy improvement,
+but MPC's LP solve at every step depends on all 96 horizon-specific
+forecasts simultaneously — it's entirely possible wind helps at horizon
+24 specifically while hurting at other horizons (plausibly the near-term
+ones that dominate the immediate charge/discharge decision), which the
+single-horizon check couldn't have caught. Not independently confirmed;
+flagged honestly as an incomplete picture rather than a fully-explained
+one.
+
+**This is the third time in this exploration that a real, carefully-
+verified accuracy improvement has failed to improve — or actively
+worsened — real MPC profit** (quantile-α=0.85 in ADR-021; DAM's null
+result in ADR-020's update; now wind). Different mechanisms each time,
+same pattern: point-forecast-accuracy interventions on this specific
+problem do not reliably translate into better control-loop decisions,
+even when the underlying signal is real, well-evidenced, and genuinely
+used by the model. This is a real, load-bearing finding in its own right
+— not a string of failures to smooth over, but consistent evidence that
+the forecast-then-optimize architecture itself may have a ceiling here
+that isn't fixable by feeding it better point forecasts, which is exactly
+the argument for trying a fundamentally different control approach (e.g.
+reinforcement learning trained directly on profit) rather than continuing
+to iterate on forecaster inputs.
