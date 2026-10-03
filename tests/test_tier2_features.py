@@ -19,6 +19,7 @@ from bess.features import (
     LAG_PERIODS,
     build_features,
     build_features_with_dam,
+    build_features_with_actual_generation,
     build_features_with_weather_ceiling,
     build_features_with_wind,
     longest_lookback_periods,
@@ -488,6 +489,57 @@ def test_build_features_with_wind_drops_rows_with_no_matching_forecast():
     wind_df = _synthetic_hourly_wind_forecast(n_days - 1, lambda h: 5000.0)
 
     features = build_features_with_wind(rtm_df, wind_df, tz=CHICAGO)
+
+    assert not features.isna().any().any()
+    last_day = date(2026, 1, 1) + timedelta(days=n_days - 1)
+    assert (features["timestamp_utc"].dt.date < last_day).all()
+
+
+# --- build_features_with_actual_generation (ceiling test) --------------------------
+
+
+def _synthetic_hourly_generation(n_days: int, value_fn, gen_column: str) -> pd.DataFrame:
+    """One row per UTC hour, with just the one actual-generation column a
+    real sources_ercot_solar/wind fetch would carry (plus timestamp_utc) —
+    deliberately a narrower shape than the weather/wind-forecast helpers,
+    since build_features_with_actual_generation() reads exactly one named
+    column from each of its two input frames, not "every column present"."""
+    start_date = date(2026, 1, 1)
+    start_utc, _ = settlement_day_utc_bounds(start_date)
+    n_hours = n_days * 24
+    timestamps = [start_utc + timedelta(hours=h) for h in range(n_hours)]
+    return pd.DataFrame(
+        {
+            "timestamp_utc": pd.to_datetime(timestamps, utc=True),
+            gen_column: [value_fn(h) for h in range(n_hours)],
+        }
+    )
+
+
+def test_build_features_with_actual_generation_merges_the_correct_hour():
+    n_days = 10
+    rtm_df = _synthetic_15min_price_history(n_days, lambda i: 1.0)
+    solar_df = _synthetic_hourly_generation(n_days, lambda h: float(h), "solar_gen_farwest_mw")
+    wind_df = _synthetic_hourly_generation(n_days, lambda h: float(h) * 10, "wind_gen_west_mw")
+
+    features = build_features_with_actual_generation(rtm_df, solar_df, wind_df, tz=CHICAGO)
+
+    solar_by_hour = solar_df.set_index("timestamp_utc")["solar_gen_farwest_mw"]
+    wind_by_hour = wind_df.set_index("timestamp_utc")["wind_gen_west_mw"]
+    for _, row in features.iterrows():
+        h = row["timestamp_utc"].floor("h")
+        assert row["solar_gen_farwest_mw"] == pytest.approx(solar_by_hour[h])
+        assert row["wind_gen_west_mw"] == pytest.approx(wind_by_hour[h])
+
+
+def test_build_features_with_actual_generation_drops_rows_missing_either_source():
+    n_days = 10
+    rtm_df = _synthetic_15min_price_history(n_days, lambda i: 1.0)
+    # solar covers the full range, wind is missing the last day entirely
+    solar_df = _synthetic_hourly_generation(n_days, lambda h: 1.0, "solar_gen_farwest_mw")
+    wind_df = _synthetic_hourly_generation(n_days - 1, lambda h: 1.0, "wind_gen_west_mw")
+
+    features = build_features_with_actual_generation(rtm_df, solar_df, wind_df, tz=CHICAGO)
 
     assert not features.isna().any().any()
     last_day = date(2026, 1, 1) + timedelta(days=n_days - 1)

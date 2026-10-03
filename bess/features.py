@@ -207,3 +207,42 @@ def build_features_with_wind(rtm_df: pd.DataFrame, wind_forecast_df: pd.DataFram
     features["wind_wgrpp_west_mw"] = wind_by_hour.reindex(hour).to_numpy()
 
     return features.dropna().reset_index(drop=True)
+
+
+def build_features_with_actual_generation(
+    rtm_df: pd.DataFrame, solar_df: pd.DataFrame, wind_df: pd.DataFrame, tz: ZoneInfo = LONDON
+) -> pd.DataFrame:
+    """
+    build_features() for ERCOT RTM, plus the ACTUAL (perfect-foresight)
+    solar and wind generation for the exact hour each RTM period falls in
+    — `solar_gen_farwest_mw` from sources_ercot_solar.fetch_solar_generation()
+    and `wind_gen_west_mw` from sources_ercot_wind.fetch_wind_generation().
+
+    This is a CEILING TEST, same spirit as build_features_with_weather_
+    ceiling(): NOT leakage-safe (you would never actually know real-time
+    generation in advance of the delivery hour; build_features_with_wind()'s
+    WGRPP forecast is the realistic one). It answers a different, sharper
+    question than the realistic feature tests do: if the model had PERFECT
+    knowledge of generation — not just an accurate forecast of it — would
+    MPC's profit improve at all? If even perfect information doesn't help,
+    that's strong evidence the problem found in ADR-022 (real, verified
+    accuracy improvements failing to improve, or worsening, real MPC
+    profit) is structural — something about the forecast-then-optimize
+    architecture itself, or how MPC's LP uses these features — rather
+    than simply "the forecasts aren't accurate enough yet."
+
+    A period whose hour has no matching solar or wind row is dropped,
+    same "don't invent it" policy as a missing lag or DAM match.
+
+    tz must match rtm_df's actual market (pass tz=CHICAGO for real ERCOT
+    data) — see build_features()'s docstring for why.
+    """
+    features = build_features(rtm_df, tz=tz)
+
+    solar_by_hour = solar_df.set_index("timestamp_utc")["solar_gen_farwest_mw"]
+    wind_by_hour = wind_df.set_index("timestamp_utc")["wind_gen_west_mw"]
+    hour = features["timestamp_utc"].dt.floor("h")
+    features["solar_gen_farwest_mw"] = solar_by_hour.reindex(hour).to_numpy()
+    features["wind_gen_west_mw"] = wind_by_hour.reindex(hour).to_numpy()
+
+    return features.dropna().reset_index(drop=True)
